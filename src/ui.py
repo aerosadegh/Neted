@@ -2,6 +2,7 @@ from typing import Optional
 
 # Third-party imports
 from PyQt6.QtCore import Qt
+import qtawesome as qta
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -11,6 +12,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QComboBox,
     QLabel,
+    QCheckBox,
     QMessageBox,
     QTreeWidget,
     QTreeWidgetItem,
@@ -36,8 +38,10 @@ class NetworkGadgetUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Network Ed - Pro Edition")
-        self.resize(700, 380)
-        self.setMinimumSize(600, 350)
+
+        self.resize(500, 350)
+        self.setMinimumSize(450, 280)
+
         self.groups = ProfileStore.load()
         self.current_profile: Optional[NetworkProfile] = None
 
@@ -51,32 +55,55 @@ class NetworkGadgetUI(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # --- Top Bar: System Status ---
-        status_group = QGroupBox("System Interface Status")
-        status_layout = QHBoxLayout(status_group)
+        main_layout.setContentsMargins(5, 5, 5, 5)
+        main_layout.setSpacing(5)
+        # ---> ADD THIS: Global styling for input padding
+        self.setStyleSheet("""
+            QLineEdit { padding: 5px; border-radius: 3px; }
+        """)
 
+        # --- Top Bar: System Status ---
+        status_group = QGroupBox("System Status")
+        status_layout = QVBoxLayout(status_group)
+        status_layout.setContentsMargins(5, 5, 5, 5)
+
+        top_row = QHBoxLayout()
         self.interface_combo = QComboBox()
         self.interface_combo.addItems(NetworkManager.get_network_interfaces())
         self.interface_combo.currentTextChanged.connect(self._update_system_status)
 
-        self.lbl_active_ip = QLabel("Active IP: Scanning...")
-        self.lbl_active_ip.setStyleSheet("font-weight: bold; color: #2C3E50;")
-
-        btn_refresh = QPushButton("Refresh Status")
-        btn_refresh.clicked.connect(self._update_system_status)
-
-        self.btn_dhcp = QPushButton("Reset to DHCP")
-        self.btn_dhcp.setStyleSheet(
-            "background-color: #3498DB; color: white; font-weight: bold;"
-        )
+        self.btn_dhcp = QPushButton(" DHCP")
+        self.btn_dhcp.setIcon(qta.icon("fa5s.network-wired", color="#3498DB"))
+        # ---> UPDATED: Demoted to an outline button to reduce visual noise
+        self.btn_dhcp.setStyleSheet("""
+            QPushButton {
+                background-color: transparent; 
+                color: #3498DB; 
+                border: 1px solid #3498DB;
+                border-radius: 4px;
+                padding: 5px 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: rgba(52, 152, 219, 0.1); }
+        """)
         self.btn_dhcp.clicked.connect(self._set_to_dhcp)
 
-        status_layout.addWidget(QLabel("Target Interface:"))
-        status_layout.addWidget(self.interface_combo)
+        btn_refresh = QPushButton(" Refresh")
+        btn_refresh.setIcon(qta.icon("fa5s.sync-alt", color="#888"))
+        btn_refresh.clicked.connect(self._update_system_status)
+
+        top_row.addWidget(QLabel("Interface:"))
+        top_row.addWidget(self.interface_combo)
+        top_row.addStretch()
+        top_row.addWidget(self.btn_dhcp)
+        top_row.addWidget(btn_refresh)
+
+        self.lbl_active_ip = QLabel("Active IP: Scanning...")
+        # Changed from dark #2C3E50 to a brighter accent blue
+        self.lbl_active_ip.setStyleSheet("font-weight: bold; color: #5DADE2;")
+
+        status_layout.addLayout(top_row)
         status_layout.addWidget(self.lbl_active_ip)
-        status_layout.addStretch()
-        status_layout.addWidget(self.btn_dhcp)
-        status_layout.addWidget(btn_refresh)
         main_layout.addWidget(status_group)
 
         # --- Main Splitter (Tree & Editor) ---
@@ -96,7 +123,15 @@ class NetworkGadgetUI(QMainWindow):
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
 
-        btn_add_group = QPushButton("Add Group")
+        btn_add_group = QPushButton(" Add Group")
+        btn_add_group.setIcon(qta.icon("fa5s.folder-plus", color="#2C3E50"))
+        btn_add_group.setStyleSheet("""
+            QPushButton {
+                border-top-left-radius: 0px; 
+                border-top-right-radius: 0px;
+                padding: 6px;
+            }
+        """)
         btn_add_group.clicked.connect(self._add_group)
         left_layout.addWidget(btn_add_group)
 
@@ -105,25 +140,32 @@ class NetworkGadgetUI(QMainWindow):
         # Right Side
         right_widget = QWidget()
         right_main_layout = QVBoxLayout(right_widget)
-        right_main_layout.setContentsMargins(10, 0, 0, 0)
+        right_main_layout.setContentsMargins(5, 0, 0, 0)
 
         self.form_layout = QFormLayout()
-        self.form_layout.setVerticalSpacing(8)
+        self.form_layout.setVerticalSpacing(4)
+        self.form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.chk_dns_only = QCheckBox(" DNS-Only Update")
+        self.chk_dns_only.setStyleSheet("font-weight: bold; color: #5DADE2;")
+        self.chk_dns_only.stateChanged.connect(self._toggle_dns_mode)
 
         self.txt_name = QLineEdit()
         self.txt_ip = QLineEdit()
-        self.txt_ip.setPlaceholderText("Leave blank for DNS-Only update")
 
         self.txt_ip.editingFinished.connect(self._auto_fill_subnet_mask)
         self.txt_mask = QLineEdit()
-        self.txt_mask.setPlaceholderText("Leave blank for DNS-Only update")
         self.txt_gateway = QLineEdit()
-        self.txt_gateway.setPlaceholderText("Optional")
         self.txt_dns1 = QLineEdit()
-        self.txt_dns1.setPlaceholderText("Optional")
         self.txt_dns2 = QLineEdit()
+
+        # Add placeholders ONLY for optional items now
+        self.txt_gateway.setPlaceholderText("Optional")
+        self.txt_dns1.setPlaceholderText("Optional")
         self.txt_dns2.setPlaceholderText("Optional")
 
+        # Assemble the form
+        self.form_layout.addRow("", self.chk_dns_only)
         self.form_layout.addRow("Profile Name:", self.txt_name)
         self.form_layout.addRow("IP Address:", self.txt_ip)
         self.form_layout.addRow("Subnet Mask:", self.txt_mask)
@@ -133,16 +175,60 @@ class NetworkGadgetUI(QMainWindow):
 
         right_main_layout.addLayout(self.form_layout)
 
-        self.btn_save = QPushButton("Save to Library")
-        self.btn_save.clicked.connect(self._save_current_profile)
-        right_main_layout.addWidget(self.btn_save)
+        # --- Bottom Action Bar ---
+        action_layout = QHBoxLayout()
+        action_layout.setContentsMargins(0, 10, 0, 0)
+        action_layout.setSpacing(10)
 
-        self.btn_apply = QPushButton("⚡ APPLY TO SYSTEM ⚡")
-        self.btn_apply.setStyleSheet(
-            "background-color: #27AE60; color: white; font-weight: bold; padding: 10px; margin-top: 5px;"
-        )
+        self.btn_save = QPushButton(" Save")
+        # Change the icon to a neutral gray so it is visible in both Light and Dark mode
+        self.btn_save.setIcon(qta.icon("fa5s.save", color="#888888"))
+
+        # Adaptive Outline Style: Transparent background with hover effects
+        self.btn_save.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 2px solid #888888;
+                border-radius: 5px;
+                padding: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(136, 136, 136, 0.15);
+            }
+            QPushButton:pressed {
+                background-color: rgba(136, 136, 136, 0.3);
+            }
+        """)
+        self.btn_save.clicked.connect(self._save_current_profile)
+
+        self.btn_apply = QPushButton(" APPLY TO SYSTEM")
+        self.btn_apply.setIcon(qta.icon("fa5s.bolt", color="white"))
+
+        # Modern Material Green with interactive hover and press states
+        self.btn_apply.setStyleSheet("""
+            QPushButton {
+                background-color: #059669;
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #047857;
+            }
+            QPushButton:pressed {
+                background-color: #064e3b;
+            }
+        """)
         self.btn_apply.clicked.connect(self._apply_profile)
-        right_main_layout.addWidget(self.btn_apply)
+
+        action_layout.addWidget(self.btn_save, 1)
+        action_layout.addWidget(self.btn_apply, 2)
+
+        right_main_layout.addLayout(action_layout)
+        right_main_layout.addStretch()
 
         right_main_layout.addStretch()
 
@@ -164,12 +250,12 @@ class NetworkGadgetUI(QMainWindow):
         if not ip_text or current_mask:
             return
 
-        parts = ip_text.split('.')
-        
+        parts = ip_text.split(".")
+
         # Ensure it looks like a valid IP address before guessing
         if len(parts) == 4 and parts[0].isdigit():
             first_octet = int(parts[0])
-            
+
             # Class A
             if 1 <= first_octet <= 126:
                 self.txt_mask.setText("255.0.0.0")
@@ -180,7 +266,30 @@ class NetworkGadgetUI(QMainWindow):
             elif 192 <= first_octet <= 223:
                 self.txt_mask.setText("255.255.255.0")
             # If it's a loopback (127) or experimental (>223), we leave it blank
-            
+
+    def _toggle_dns_mode(self, state: int) -> None:
+        """Enables or disables IP fields based on the DNS-Only checkbox."""
+        is_dns_only = (state == 2)  
+
+        # True if we should show the fields, False if we should hide them
+        show_fields = not is_dns_only
+
+        # Hide/Show the input boxes
+        self.txt_ip.setVisible(show_fields)
+        self.txt_mask.setVisible(show_fields)
+        self.txt_gateway.setVisible(show_fields)
+
+        # Hide/Show the labels next to the input boxes in the form layout
+        self.form_layout.labelForField(self.txt_ip).setVisible(show_fields)
+        self.form_layout.labelForField(self.txt_mask).setVisible(show_fields)
+        self.form_layout.labelForField(self.txt_gateway).setVisible(show_fields)
+
+        # Clear the data if we are hiding them
+        if is_dns_only:
+            self.txt_ip.clear()
+            self.txt_mask.clear()
+            self.txt_gateway.clear()
+
     def _setup_system_tray(self) -> None:
         """Initializes the system tray icon and context menu."""
         self.tray_icon = QSystemTrayIcon(self)
@@ -242,16 +351,16 @@ class NetworkGadgetUI(QMainWindow):
             event.accept()
         else:
             # If the user clicked the "X", hide the window instead
-            event.ignore()  
-            self.hide()     
-            
+            event.ignore()
+            self.hide()
+
             self.tray_icon.showMessage(
                 "Running in Background",
                 "Network Ed is still running in your system tray.",
                 QSystemTrayIcon.MessageIcon.Information,
-                2000 
+                2000,
             )
-    
+
     def _update_system_status(self) -> None:
         iface = self.interface_combo.currentText()
         if not iface:
@@ -310,6 +419,9 @@ class NetworkGadgetUI(QMainWindow):
             self.txt_gateway.setText(data.gateway or "")
             self.txt_dns1.setText(data.dns_primary or "")
             self.txt_dns2.setText(data.dns_secondary or "")
+
+            is_dns_only = not bool(data.ip_address and data.ip_address.strip())
+            self.chk_dns_only.setChecked(is_dns_only)
         else:
             self.editor_widget.setEnabled(False)
             self.current_profile = None
@@ -339,6 +451,8 @@ class NetworkGadgetUI(QMainWindow):
     def _apply_profile(self) -> None:
         if not self.current_profile:
             return
+
+        self._save_current_profile()
 
         interface = self.interface_combo.currentText()
         try:
