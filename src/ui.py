@@ -114,6 +114,7 @@ class NetworkGadgetUI(QMainWindow):
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabel("Profile Library")
@@ -146,9 +147,10 @@ class NetworkGadgetUI(QMainWindow):
         self.form_layout.setVerticalSpacing(4)
         self.form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        self.chk_dns_only = QCheckBox(" DNS-Only Update")
+        self.chk_dns_only = QCheckBox("DNS-Only")
         self.chk_dns_only.setStyleSheet("font-weight: bold; color: #5DADE2;")
         self.chk_dns_only.stateChanged.connect(self._toggle_dns_mode)
+
 
         self.txt_name = QLineEdit()
         self.txt_ip = QLineEdit()
@@ -164,10 +166,14 @@ class NetworkGadgetUI(QMainWindow):
         self.txt_dns1.setPlaceholderText("Optional")
         self.txt_dns2.setPlaceholderText("Optional")
 
+        ip_layout = QHBoxLayout()
+        ip_layout.setContentsMargins(0, 0, 0, 0)
+        ip_layout.addWidget(self.txt_ip)
+        ip_layout.addWidget(self.chk_dns_only)
+
         # Assemble the form
-        self.form_layout.addRow("", self.chk_dns_only)
         self.form_layout.addRow("Profile Name:", self.txt_name)
-        self.form_layout.addRow("IP Address:", self.txt_ip)
+        self.form_layout.addRow("IP Address:", ip_layout)  # <--- Add the combined layout here
         self.form_layout.addRow("Subnet Mask:", self.txt_mask)
         self.form_layout.addRow("Gateway:", self.txt_gateway)
         self.form_layout.addRow("Primary DNS:", self.txt_dns1)
@@ -268,23 +274,31 @@ class NetworkGadgetUI(QMainWindow):
             # If it's a loopback (127) or experimental (>223), we leave it blank
 
     def _toggle_dns_mode(self, state: int) -> None:
-        """Enables or disables IP fields based on the DNS-Only checkbox."""
-        is_dns_only = (state == 2)  
+        """Shows or hides IP fields based on the DNS-Only checkbox."""
+        is_dns_only = state == 2
 
         # True if we should show the fields, False if we should hide them
         show_fields = not is_dns_only
 
-        # Hide/Show the input boxes
+        # 1. Hide/Show the input boxes
         self.txt_ip.setVisible(show_fields)
         self.txt_mask.setVisible(show_fields)
         self.txt_gateway.setVisible(show_fields)
 
-        # Hide/Show the labels next to the input boxes in the form layout
-        self.form_layout.labelForField(self.txt_ip).setVisible(show_fields)
-        self.form_layout.labelForField(self.txt_mask).setVisible(show_fields)
-        self.form_layout.labelForField(self.txt_gateway).setVisible(show_fields)
+        # 2. Hide/Show the labels for Mask and Gateway
+        # (We use an 'if' check defensively to prevent crashes if the label isn't found)
+        mask_label = self.form_layout.labelForField(self.txt_mask)
+        if mask_label:
+            mask_label.setVisible(show_fields)
+            
+        gateway_label = self.form_layout.labelForField(self.txt_gateway)
+        if gateway_label:
+            gateway_label.setVisible(show_fields)
 
-        # Clear the data if we are hiding them
+        # NOTE: We intentionally do NOT hide the IP Address label because 
+        # the DNS-Only checkbox still lives on that row and needs the context!
+
+        # 3. Clear the data if we are hiding them
         if is_dns_only:
             self.txt_ip.clear()
             self.txt_mask.clear()
