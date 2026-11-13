@@ -236,7 +236,7 @@ def test_removed_adapter_falls_back_and_says_so(qapp, window, adapters):
 def test_network_change_during_apply_waits_until_done(qapp, window, adapters, monkeypatch):
     gate = threading.Event()
     monkeypatch.setattr(
-        NetworkManager, "apply_profile", classmethod(lambda cls, i, p: gate.wait(5))
+        NetworkManager, "apply_profile", classmethod(lambda cls, i, p: gate.wait(5) and None)
     )
     select(window, 0, 0)
     window._apply_profile()

@@ -426,7 +426,17 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Closing the window hides it to the tray; Quit in the tray menu exits."""
+        """Closing the window hides it to the tray; Quit in the tray menu exits.
+
+        Without a system tray (e.g. GNOME without the AppIndicator extension) a hidden
+        window couldn't be brought back, so closing quits instead.
+        """
+        if not self._is_quitting and not QSystemTrayIcon.isSystemTrayAvailable():
+            if not self._resolve_unsaved_changes():
+                event.ignore()
+                return
+            self._is_quitting = True
+            QApplication.quit()
         if self._is_quitting:
             self._watcher.stop()
             self._tasks.shutdown()
@@ -973,7 +983,7 @@ class MainWindow(QMainWindow):
         self._set_busy(True, f"Applying '{profile.name}' to '{interface}'...")
         self._tasks.run(
             lambda: NetworkManager.apply_profile(interface, profile),
-            lambda _: self._on_change_done(f"SUCCESS: Profile applied to '{interface}'"),
+            lambda note: self._on_change_done(note or f"SUCCESS: Profile applied to '{interface}'"),
             lambda exc: self._on_change_failed("Error", exc),
         )
 
@@ -993,7 +1003,7 @@ class MainWindow(QMainWindow):
         self._set_busy(True, f"Switching '{interface}' to DHCP...")
         self._tasks.run(
             lambda: NetworkManager.enable_dhcp(interface),
-            lambda _: self._on_change_done(f"SUCCESS: '{interface}' reverted to DHCP"),
+            lambda note: self._on_change_done(note or f"SUCCESS: '{interface}' reverted to DHCP"),
             lambda exc: self._on_change_failed("Failed to set DHCP", exc),
         )
 

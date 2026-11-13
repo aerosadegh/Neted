@@ -1,24 +1,30 @@
 """Tells the app when network adapters or their IPv4 addresses change.
 
-Uses the Windows IP Helper change notifications (NotifyIpInterfaceChange and
-NotifyUnicastIpAddressChange). Windows calls back on its own thread pool when an
-adapter appears or disappears, connects or disconnects, or gets a new address.
-Bursts of callbacks (plugging in a cable produces several) are folded into one
-`changed` signal on the GUI thread. Nothing runs while the network is quiet.
+- Windows: the IP Helper change notifications (NotifyIpInterfaceChange and
+  NotifyUnicastIpAddressChange). Windows calls back on its own thread pool when an
+  adapter appears or disappears, connects or disconnects, or gets a new address.
+- Linux: the event stream of `ip monitor link address`; each line is a change.
+
+Bursts of events (plugging in a cable produces several) are folded into one `changed`
+signal on the GUI thread. Nothing runs while the network is quiet.
 """
 
 import contextlib
 import ctypes
+import shutil
 import sys
-from ctypes import wintypes
 from typing import Any
 
-from PyQt6.QtCore import QCoreApplication, QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QCoreApplication, QObject, QProcess, QTimer, pyqtSignal
+
+if sys.platform == "win32":
+    from ctypes import wintypes
 
 AF_UNSPEC = 0
 AF_INET = 2
 NO_ERROR = 0
 DEBOUNCE_MS = 1000
+LINUX_MONITOR = ["ip", "monitor", "link", "address"]
 
 # VOID (WINAPI *)(PVOID CallerContext, PMIB_..._ROW Row, MIB_NOTIFICATION_TYPE Type)
 _CALLBACK = (
@@ -65,13 +71,15 @@ class NetworkChangeWatcher(QObject):
         self,
         parent: QObject | None = None,
         debounce_ms: int = DEBOUNCE_MS,
-        initial_notification: bool = False,  # tests use this to get one real callback
+        initial_notification: bool = False,  # Windows tests: get one real callback
+        command: list[str] | None = None,  # watch this command's output instead (tests)
     ):
         super().__init__(parent)
         self._active = False
         self._api: Any | None = None
-        self._handles: list[wintypes.HANDLE] = []
+        self._handles: list[Any] = []
         self._callback: Any | None = None
+        self._process: QProcess | None = None
 
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -79,11 +87,34 @@ class NetworkChangeWatcher(QObject):
         self._debounce.timeout.connect(self._emit_changed)
         self._windows_event.connect(self._restart_debounce)  # queued to this object's thread
 
-        self.available = self._register(initial_notification)
+        if command is not None:
+            self.available = self._watch_process(command)
+        elif sys.platform == "win32":
+            self.available = self._register(initial_notification)
+        else:
+            self.available = self._watch_process(LINUX_MONITOR)
 
         app = QCoreApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.stop)
+
+    def _watch_process(self, command: list[str]) -> bool:
+        """Treats every line a long-running command prints as a network change."""
+        if shutil.which(command[0]) is None:
+            return False
+        self._process = QProcess(self)
+        self._process.readyReadStandardOutput.connect(self._on_process_output)
+        self._process.start(command[0], command[1:])
+        if not self._process.waitForStarted(3000):
+            self._process = None
+            return False
+        self._active = True
+        return True
+
+    def _on_process_output(self) -> None:
+        if self._process is not None:
+            self._process.readAllStandardOutput()  # the content doesn't matter
+        self._restart_debounce()
 
     def _register(self, initial_notification: bool) -> bool:
         api = _load_iphlpapi()
@@ -127,8 +158,13 @@ class NetworkChangeWatcher(QObject):
             self.changed.emit()
 
     def stop(self) -> None:
-        """Unsubscribes from Windows. Safe to call more than once."""
+        """Unsubscribes / ends the monitor process. Safe to call more than once."""
         self._active = False
+        if self._process is not None:
+            with contextlib.suppress(RuntimeError):  # already deleted with its parent
+                self._process.kill()
+                self._process.waitForFinished(2000)
+            self._process = None
         while self._handles and self._api is not None:
             # Waits for a callback that is already running; ctypes releases the GIL
             # meanwhile, so that callback can finish.

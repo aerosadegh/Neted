@@ -95,3 +95,28 @@ def test_without_windows_api_it_is_a_quiet_no_op(qapp, monkeypatch):
     w = NetworkChangeWatcher()
     assert not w.available
     w.stop()
+
+
+# --- process-based watcher (Linux uses `ip monitor`; tested here with a stand-in) ---
+
+
+def test_process_watcher_folds_output_lines_into_one_signal(qapp):
+    # Prints three "events" at once, then stays alive like `ip monitor` does.
+    script = "import sys, time; [print(e) for e in 'abc']; sys.stdout.flush(); time.sleep(30)"
+    w = NetworkChangeWatcher(debounce_ms=50, command=[sys.executable, "-c", script])
+    hits = []
+    w.changed.connect(lambda: hits.append(1))
+    try:
+        assert w.available
+        assert wait_for(qapp, lambda: hits, timeout=10), "no change signal from the process"
+        wait_for(qapp, lambda: False, timeout=0.2)
+        assert hits == [1]
+    finally:
+        w.stop()
+    assert w._process is None
+
+
+def test_missing_monitor_command_is_a_quiet_no_op(qapp):
+    w = NetworkChangeWatcher(command=["no-such-command-xyz", "monitor"])
+    assert not w.available
+    w.stop()
