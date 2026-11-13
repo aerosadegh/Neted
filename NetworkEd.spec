@@ -10,51 +10,55 @@ import tomllib
 from pathlib import Path
 
 from PyInstaller.compat import is_win
-from PyInstaller.utils.win32.versioninfo import (
-    FixedFileInfo,
-    StringFileInfo,
-    StringStruct,
-    StringTable,
-    VarFileInfo,
-    VarStruct,
-    VSVersionInfo,
-)
 
-# --- Windows version resource (Properties > Details in Explorer) ---
 # The version comes from pyproject.toml; CI adds its run number as the 4th part.
 VERSION = tomllib.loads(Path(SPECPATH, 'pyproject.toml').read_text(encoding='utf-8'))['project']['version']
 major, minor, patch = (int(n or 0) for n in re.match(r'(\d+)\.(\d+)(?:\.(\d+))?', VERSION).groups())
 BUILD = int(os.environ.get('GITHUB_RUN_NUMBER', '0')) % 65536
 FILE_VERSION = (major, minor, patch, BUILD)
 
-version_info = VSVersionInfo(
-    ffi=FixedFileInfo(
-        filevers=FILE_VERSION,
-        prodvers=FILE_VERSION,
-        mask=0x3F,
-        flags=0x0,
-        OS=0x40004,  # Windows NT, 32-bit+ API
-        fileType=0x1,  # application
-        subtype=0x0,
-        date=(0, 0),
-    ),
-    kids=[
-        StringFileInfo([
-            StringTable('040904B0', [
-                StringStruct('CompanyName', 'Neted'),
-                StringStruct('FileDescription', 'Network Ed'),  # Task Manager shows this as the process name
-                StringStruct('Comments', 'Switch Windows network adapters between saved IP/DNS profiles and DHCP.'),
-                StringStruct('FileVersion', '.'.join(map(str, FILE_VERSION))),
-                StringStruct('InternalName', 'NetworkEd'),
-                StringStruct('LegalCopyright', 'Neted contributors. Licensed under AGPL-3.0.'),
-                StringStruct('OriginalFilename', 'NetworkEd.exe'),
-                StringStruct('ProductName', 'Network Ed'),
-                StringStruct('ProductVersion', VERSION),
-            ])
-        ]),
-        VarFileInfo([VarStruct('Translation', [0x0409, 1200])]),
-    ],
-)
+
+def windows_version_info():
+    """Version resource shown in Properties > Details. Windows only: the module needs
+    `pefile`, which PyInstaller installs only on Windows."""
+    from PyInstaller.utils.win32.versioninfo import (
+        FixedFileInfo,
+        StringFileInfo,
+        StringStruct,
+        StringTable,
+        VarFileInfo,
+        VarStruct,
+        VSVersionInfo,
+    )
+
+    return VSVersionInfo(
+        ffi=FixedFileInfo(
+            filevers=FILE_VERSION,
+            prodvers=FILE_VERSION,
+            mask=0x3F,
+            flags=0x0,
+            OS=0x40004,  # Windows NT, 32-bit+ API
+            fileType=0x1,  # application
+            subtype=0x0,
+            date=(0, 0),
+        ),
+        kids=[
+            StringFileInfo([
+                StringTable('040904B0', [
+                    StringStruct('CompanyName', 'Neted'),
+                    StringStruct('FileDescription', 'Network Ed'),  # Task Manager shows this as the process name
+                    StringStruct('Comments', 'Switch network adapters between saved IP/DNS profiles and DHCP.'),
+                    StringStruct('FileVersion', '.'.join(map(str, FILE_VERSION))),
+                    StringStruct('InternalName', 'NetworkEd'),
+                    StringStruct('LegalCopyright', 'Neted contributors. Licensed under AGPL-3.0.'),
+                    StringStruct('OriginalFilename', 'NetworkEd.exe'),
+                    StringStruct('ProductName', 'Network Ed'),
+                    StringStruct('ProductVersion', VERSION),
+                ])
+            ]),
+            VarFileInfo([VarStruct('Translation', [0x0409, 1200])]),
+        ],
+    )
 
 
 a = Analysis(
@@ -141,7 +145,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon='assets/icon.ico' if is_win else None,
-    version=version_info if is_win else None,
+    version=windows_version_info() if is_win else None,
     # NETED_NO_UAC=1 builds a test exe that can run from a non-elevated shell
     # (local self-test only; releases always require admin).
     uac_admin=is_win and os.environ.get('NETED_NO_UAC') != '1',
