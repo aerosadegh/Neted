@@ -317,3 +317,54 @@ def test_refresh_keeps_profiles_when_file_is_broken(qapp, window, store_path, mo
     settle(qapp, window)
     assert warnings == ["Profiles not reloaded"]
     assert [g.name for g in window.groups] == ["Site"]
+
+
+# --- duplicate group / profile ----------------------------------------------------
+
+
+def test_copy_name_skips_names_in_use():
+    assert ui.copy_name("sw", {"sw"}) == "sw (copy)"
+    assert ui.copy_name("sw", {"sw", "sw (copy)", "sw (copy 2)"}) == "sw (copy 3)"
+
+
+def test_duplicate_profile(qapp, window):
+    group_item = window.tree.topLevelItem(0)
+    original = window.groups[0].profiles[0]
+    window._duplicate_profile(group_item.child(0), original)
+
+    profiles = window.groups[0].profiles
+    assert [p.name for p in profiles] == ["sw", "sw (copy)", "dns"], "copy sits below original"
+    copy = profiles[1]
+    assert copy is not original
+    assert (copy.ip_address, copy.subnet_mask) == (original.ip_address, original.subnet_mask)
+    assert group_item.child(1).text(0) == "sw (copy)"
+    assert window.current_profile is copy, "the copy is selected"
+    assert [p.name for p in ProfileStore.load()[0].profiles] == ["sw", "sw (copy)", "dns"]
+
+    window._duplicate_profile(group_item.child(0), original)
+    assert window.groups[0].profiles[1].name == "sw (copy 2)"
+
+
+def test_duplicate_group_copies_profiles(qapp, window):
+    original = window.groups[0]
+    window._duplicate_group(window.tree.topLevelItem(0), original)
+
+    assert [g.name for g in window.groups] == ["Site", "Site (copy)"]
+    copy = window.groups[1]
+    assert [p.name for p in copy.profiles] == ["sw", "dns"]
+    assert all(c is not o for c, o in zip(copy.profiles, original.profiles, strict=True))
+    assert window.tree.topLevelItem(1).childCount() == 2
+    assert [g.name for g in ProfileStore.load()] == ["Site", "Site (copy)"]
+
+
+def test_delete_removes_the_clicked_profile_not_an_equal_one(qapp, window, monkeypatch):
+    monkeypatch.setattr(ui.QMessageBox, "question", lambda *a: ui.QMessageBox.StandardButton.Yes)
+    group = window.groups[0]
+    first = group.profiles[0]
+    twin = NetworkProfile(**vars(first))  # equal fields, different object
+    group.profiles.insert(1, twin)
+    window._populate_tree()
+
+    window._delete_profile(window.tree.topLevelItem(0).child(1), twin)
+    assert group.profiles[0] is first
+    assert len(group.profiles) == 2

@@ -76,6 +76,19 @@ def describe_status(
     return f"Active: {text}"
 
 
+def copy_name(name: str, taken: set[str]) -> str:
+    """'sw' -> 'sw (copy)', then 'sw (copy 2)', 'sw (copy 3)', ... skipping names in use."""
+    candidate, n = f"{name} (copy)", 2
+    while candidate in taken:
+        candidate, n = f"{name} (copy {n})", n + 1
+    return candidate
+
+
+def index_of(items: list, obj: object) -> int:
+    """Position of this exact object (not just an equal one: duplicates compare equal)."""
+    return next(i for i, item in enumerate(items) if item is obj)
+
+
 def adapter_label(adapter: Adapter) -> str:
     return adapter.name if adapter.is_up else f"{adapter.name} ({adapter.status})"
 
@@ -527,12 +540,23 @@ class MainWindow(QMainWindow):
     def _populate_tree(self) -> None:
         self.tree.clear()
         for group in self.groups:
-            group_item = QTreeWidgetItem(self.tree, [group.name])
-            group_item.setData(0, _DATA, group)
+            group_item = self._group_item(group)
+            self.tree.addTopLevelItem(group_item)
             group_item.setExpanded(True)
-            for profile in group.profiles:
-                profile_item = QTreeWidgetItem(group_item, [profile.name])
-                profile_item.setData(0, _DATA, profile)
+
+    @staticmethod
+    def _profile_item(profile: NetworkProfile) -> QTreeWidgetItem:
+        item = QTreeWidgetItem([profile.name])
+        item.setData(0, _DATA, profile)
+        return item
+
+    @classmethod
+    def _group_item(cls, group: ProfileGroup) -> QTreeWidgetItem:
+        item = QTreeWidgetItem([group.name])
+        item.setData(0, _DATA, group)
+        for profile in group.profiles:
+            item.addChild(cls._profile_item(profile))
+        return item
 
     def _persist(self) -> bool:
         try:
@@ -581,27 +605,71 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
 
         if isinstance(data, ProfileGroup):
-            action_add = menu.addAction("Add New Profile Here")
-            action_delete = menu.addAction("Delete Group")
+            action_add = menu.addAction(qta.icon("fa5s.plus", color="#888"), "Add New Profile Here")
+            action_copy = menu.addAction(qta.icon("fa5s.copy", color="#888"), "Duplicate Group")
+            menu.addSeparator()
+            action_delete = menu.addAction(qta.icon("fa5s.trash-alt", color="#888"), "Delete Group")
             action = menu.exec(self.tree.viewport().mapToGlobal(position))
             if action == action_add:
                 self._add_new_profile_to_group(item, data)
+            elif action == action_copy:
+                self._duplicate_group(item, data)
             elif action == action_delete:
                 self._delete_group(item, data)
 
         elif isinstance(data, NetworkProfile):
-            action_delete = menu.addAction("Delete Profile")
+            action_copy = menu.addAction(qta.icon("fa5s.copy", color="#888"), "Duplicate Profile")
+            menu.addSeparator()
+            action_delete = menu.addAction(
+                qta.icon("fa5s.trash-alt", color="#888"), "Delete Profile"
+            )
             action = menu.exec(self.tree.viewport().mapToGlobal(position))
-            if action == action_delete:
+            if action == action_copy:
+                self._duplicate_profile(item, data)
+            elif action == action_delete:
                 self._delete_profile(item, data)
+
+    def _duplicate_profile(self, item: QTreeWidgetItem, profile: NetworkProfile) -> None:
+        """Inserts a copy right below the profile and selects it."""
+        if not self._resolve_unsaved_changes():  # so the copy includes saved edits
+            return
+        group_item = item.parent()
+        group: ProfileGroup = group_item.data(0, _DATA)
+        copy = replace(profile, name=copy_name(profile.name, {p.name for p in group.profiles}))
+        index = index_of(group.profiles, profile) + 1
+        group.profiles.insert(index, copy)
+        self._persist()
+
+        copy_item = self._profile_item(copy)
+        group_item.insertChild(index, copy_item)
+        self.tree.setCurrentItem(copy_item)
+        self.statusBar().showMessage(f"Duplicated '{profile.name}' as '{copy.name}'.", 4000)
+
+    def _duplicate_group(self, item: QTreeWidgetItem, group: ProfileGroup) -> None:
+        """Inserts a copy of the group (with copies of all its profiles) right below it."""
+        if not self._resolve_unsaved_changes():
+            return
+        copy = ProfileGroup(
+            name=copy_name(group.name, {g.name for g in self.groups}),
+            profiles=[replace(p) for p in group.profiles],
+        )
+        index = index_of(self.groups, group) + 1
+        self.groups.insert(index, copy)
+        self._persist()
+
+        copy_item = self._group_item(copy)
+        self.tree.insertTopLevelItem(index, copy_item)
+        copy_item.setExpanded(True)
+        self.tree.setCurrentItem(copy_item)
+        self.statusBar().showMessage(f"Duplicated group '{group.name}' as '{copy.name}'.", 4000)
 
     def _add_new_profile_to_group(self, group_item: QTreeWidgetItem, group: ProfileGroup) -> None:
         new_profile = NetworkProfile(name="New Blank Profile")
         group.profiles.append(new_profile)
         self._persist()
 
-        profile_item = QTreeWidgetItem(group_item, [new_profile.name])
-        profile_item.setData(0, _DATA, new_profile)
+        profile_item = self._profile_item(new_profile)
+        group_item.addChild(profile_item)
         group_item.setExpanded(True)
         self.tree.setCurrentItem(profile_item)
 
@@ -615,7 +683,7 @@ class MainWindow(QMainWindow):
             self._clear_editor()  # before removal, so it isn't reported as unsaved
         parent_item = item.parent()
         group: ProfileGroup = parent_item.data(0, _DATA)
-        group.profiles.remove(profile)
+        del group.profiles[index_of(group.profiles, profile)]
         parent_item.removeChild(item)
         self._persist()
 
@@ -630,7 +698,7 @@ class MainWindow(QMainWindow):
             return
         if any(p is self.current_profile for p in group.profiles):
             self._clear_editor()
-        self.groups.remove(group)
+        del self.groups[index_of(self.groups, group)]
         self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(item))
         self._persist()
 
@@ -703,7 +771,10 @@ class MainWindow(QMainWindow):
         )
         if choice == _Button.Save:
             return self._save_current_profile()
-        return choice == _Button.Discard
+        if choice == _Button.Discard:
+            self._load_profile(self._current_item, self.current_profile)  # back to saved values
+            return True
+        return False
 
     def _set_ip_fields_visible(self, visible: bool) -> None:
         for widget in (self.txt_ip, self.txt_mask, self.txt_gateway):
