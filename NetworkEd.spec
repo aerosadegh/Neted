@@ -59,7 +59,10 @@ a = Analysis(
     ['src\\main.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets\\icon.svg', 'assets')],
+    datas=[
+        ('assets\\icon.svg', 'assets'),
+        ('pyproject.toml', '.'),  # src/version.py reads the version from it
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

@@ -25,11 +25,11 @@ Run `just check` before committing. CI (`.github/workflows/build.yml`, `windows-
 - `src/ui.py`: `MainWindow`. Profile tree, editor form, adapter picker, status line, tray. Pure helpers `describe_status` and `find_profile` sit at the top.
 - `src/network.py`: `NetworkManager`. Fixed PowerShell scripts plus the parsing of their JSON output.
 - `src/models.py`: `NetworkProfile` (with `validate()`), `ProfileGroup`, `ProfileStore` (JSON load and save), and the IP/mask helpers.
-- `src/worker.py`: `TaskRunner`. Runs blocking calls on a thread pool and calls back on the GUI thread.
+- `src/worker.py`: `TaskRunner`. Runs blocking calls on Python worker threads and calls back on the GUI thread through one signal. Don't switch it to `QThreadPool` or per-job QObjects: those caused an exit deadlock and an access violation.
 - `src/netwatch.py`: `NetworkChangeWatcher`. Windows IP Helper change notifications (ctypes). Callbacks come in on Windows threads and are debounced (1 s) into one `changed` signal on the GUI thread, which makes the UI re-scan adapters.
 - `scripts/package.py`: release packing (folder + zip; writes `$GITHUB_OUTPUT` in CI). `scripts/make_icon.py`: SVG → ICO.
 - `src/resources.py`: bundled-file paths (`sys._MEIPASS` when frozen) and `app_icon()`, rendered from the SVG.
-- `src/version.py`: `__version__`. It must equal `[project].version` in `pyproject.toml` (a test checks).
+- `src/version.py`: `__version__`, read from `pyproject.toml`, the only place the version is set (the spec bundles that file into the exe). Bump with `uv version --bump …`.
 - `NetworkEd.spec`: PyInstaller build. It reads the version from `pyproject.toml` and writes the exe's version resource.
 - `tests/`: pytest. `conftest.py` sets `QT_QPA_PLATFORM=offscreen` and provides the `qapp` and `store_path` fixtures.
 

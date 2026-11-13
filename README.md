@@ -35,7 +35,7 @@ just package  # build, then pack dist/NetworkEd-<version>.zip like the release
 just icon     # regenerate assets/icon.ico after editing assets/icon.svg
 ```
 
-To release: bump the version with `uv version --bump patch` (also update `src/version.py`; a test checks they match), commit, then push a tag `v<version>`.
+To release: `uv version --bump patch` (or `minor` / `major`; `pyproject.toml` is the only place the version lives), commit, then push a tag `v<version>`.
 
 ## License
 
