@@ -3,7 +3,6 @@
 import ipaddress
 from dataclasses import fields, replace
 
-import qtawesome as qta
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
@@ -29,6 +28,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+import icons
 from models import (
     NetworkProfile,
     ProfileGroup,
@@ -175,7 +175,7 @@ class MainWindow(QMainWindow):
         self.interface_combo.currentIndexChanged.connect(self.refresh_status)
 
         self.btn_dhcp = QPushButton(" DHCP")
-        self.btn_dhcp.setIcon(qta.icon("fa5s.network-wired", color="#3498DB"))
+        self.btn_dhcp.setIcon(icons.icon("fa5s.network-wired", color="#3498DB"))
         self.btn_dhcp.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
@@ -190,7 +190,7 @@ class MainWindow(QMainWindow):
         self.btn_dhcp.clicked.connect(self._set_to_dhcp)
 
         self.btn_refresh = QPushButton(" Refresh")
-        self.btn_refresh.setIcon(qta.icon("fa5s.sync-alt", color="#888"))
+        self.btn_refresh.setIcon(icons.icon("fa5s.sync-alt", color="#888"))
         self.btn_refresh.setToolTip(
             "Reload profiles from network_profiles.json and re-scan network adapters"
         )
@@ -226,7 +226,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.tree)
 
         btn_add_group = QPushButton(" Add Group")
-        btn_add_group.setIcon(qta.icon("fa5s.folder-plus", color="#2C3E50"))
+        btn_add_group.setIcon(icons.icon("fa5s.folder-plus", color="#2C3E50"))
         btn_add_group.setStyleSheet("""
             QPushButton {
                 border-top-left-radius: 0px;
@@ -279,7 +279,7 @@ class MainWindow(QMainWindow):
         action_layout.setSpacing(10)
 
         self.btn_save = QPushButton(" Save")
-        self.btn_save.setIcon(qta.icon("fa5s.save", color="#888888"))
+        self.btn_save.setIcon(icons.icon("fa5s.save", color="#888888"))
         self.btn_save.setStyleSheet("""
             QPushButton {
                 background-color: transparent;
@@ -294,7 +294,7 @@ class MainWindow(QMainWindow):
         self.btn_save.clicked.connect(self._save_current_profile)
 
         self.btn_apply = QPushButton(" APPLY TO SYSTEM")
-        self.btn_apply.setIcon(qta.icon("fa5s.bolt", color="white"))
+        self.btn_apply.setIcon(icons.icon("fa5s.bolt", color="white"))
         self.btn_apply.setStyleSheet("""
             QPushButton {
                 background-color: #059669;
@@ -607,10 +607,11 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
 
         if isinstance(data, ProfileGroup):
-            action_add = menu.addAction(qta.icon("fa5s.plus", color="#888"), "Add New Profile Here")
-            action_copy = menu.addAction(qta.icon("fa5s.copy", color="#888"), "Duplicate Group")
+            grey = {"color": "#888"}
+            action_add = menu.addAction(icons.icon("fa5s.plus", **grey), "Add New Profile Here")
+            action_copy = menu.addAction(icons.icon("fa5s.copy", **grey), "Duplicate Group")
             menu.addSeparator()
-            action_delete = menu.addAction(qta.icon("fa5s.trash-alt", color="#888"), "Delete Group")
+            action_delete = menu.addAction(icons.icon("fa5s.trash-alt", **grey), "Delete Group")
             action = menu.exec(self.tree.viewport().mapToGlobal(position))
             if action == action_add:
                 self._add_new_profile_to_group(item, data)
@@ -620,10 +621,10 @@ class MainWindow(QMainWindow):
                 self._delete_group(item, data)
 
         elif isinstance(data, NetworkProfile):
-            action_copy = menu.addAction(qta.icon("fa5s.copy", color="#888"), "Duplicate Profile")
+            action_copy = menu.addAction(icons.icon("fa5s.copy", color="#888"), "Duplicate Profile")
             menu.addSeparator()
             action_delete = menu.addAction(
-                qta.icon("fa5s.trash-alt", color="#888"), "Delete Profile"
+                icons.icon("fa5s.trash-alt", color="#888"), "Delete Profile"
             )
             action = menu.exec(self.tree.viewport().mapToGlobal(position))
             if action == action_copy:

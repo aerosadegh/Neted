@@ -67,10 +67,54 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # Never imported at runtime (no HTTPS); each pulls in its own copy of OpenSSL.
+    # Without _hashlib, hashlib uses Python's built-in hashes.
+    excludes=['ssl', '_ssl', '_hashlib'],
     noarchive=False,
     optimize=1,
 )
+
+# --- Trim what the app never uses (the exe went from 38.5 MB to about half) ---
+# UPX can't shrink Qt: its DLLs use Control Flow Guard, which UPX breaks, so PyInstaller
+# skips them. Leaving unused files out is what makes the exe smaller.
+# `NetworkEd.exe --self-test=report.json` (run in CI) checks the trimmed exe still starts.
+DROP_FILES = {
+    'opengl32sw.dll',  # software OpenGL fallback; the UI doesn't use OpenGL (5.5 MB)
+    'Qt6Pdf.dll',  # only needed by the PDF image plugin (2.5 MB)
+    'libcrypto-3-x64.dll',  # OpenSSL for Qt's TLS plugins; no HTTPS is used
+    'libssl-3-x64.dll',
+}
+DROP_DIRS = (
+    'PyQt6/Qt6/translations/',  # the UI is English only
+    'PyQt6/Qt6/plugins/tls/',
+    'PyQt6/Qt6/plugins/networkinformation/',
+    'PyQt6/Qt6/plugins/generic/',
+)
+# For these plugin folders only the listed files are kept (offscreen: headless self-test).
+KEEP_PLUGINS = {
+    'platforms': {'qwindows.dll', 'qoffscreen.dll'},
+    'imageformats': {'qsvg.dll', 'qico.dll'},
+}
+# src/icons.py loads only Font Awesome 5 Solid; qtawesome ships ~10 fonts (2.5 MB).
+KEEP_FONT_PREFIX = 'fontawesome5-solid-webfont'
+
+
+def _keep(entry):
+    name = entry[0].replace('\\', '/')
+    base = name.rsplit('/', 1)[-1]
+    if base in DROP_FILES or name.startswith(DROP_DIRS):
+        return False
+    plugin = re.match(r'PyQt6/Qt6/plugins/([^/]+)/(.+)$', name)
+    if plugin and plugin.group(1) in KEEP_PLUGINS:
+        return plugin.group(2) in KEEP_PLUGINS[plugin.group(1)]
+    if name.startswith('qtawesome/fonts/'):
+        return base.startswith(KEEP_FONT_PREFIX)
+    return True
+
+
+a.binaries = [entry for entry in a.binaries if _keep(entry)]
+a.datas = [entry for entry in a.datas if _keep(entry)]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -94,5 +138,7 @@ exe = EXE(
     entitlements_file=None,
     icon='assets\\icon.ico',
     version=version_info,
-    uac_admin=True,
+    # NETED_NO_UAC=1 builds a test exe that can run from a non-elevated shell
+    # (local self-test only; releases always require admin).
+    uac_admin=os.environ.get('NETED_NO_UAC') != '1',
 )
