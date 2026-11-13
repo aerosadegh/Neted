@@ -1,0 +1,116 @@
+name: Build
+
+# Pull requests: lint + tests only.
+# Version tags (v0.1.0, ...): lint + tests, then build NetworkEd.exe and attach it to a release.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch: # builds the exe only when run on a tag
+
+permissions:
+  contents: read
+
+env:
+  UPX_VERSION: "5.1.1"
+  UPX_SHA256: "fa5380bca4c2718547aaa0134bc0d8a7fa27e102f0ac6371573d60d1c21d64de"
+
+jobs:
+  check:
+    name: Lint and test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Lint
+        run: just lint
+
+      - name: Test
+        run: just test
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+  build:
+    name: Build exe
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    runs-on: windows-latest
+    outputs:
+      artifact: ${{ steps.version.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Check tag matches pyproject version
+        id: version
+        shell: pwsh
+        run: |
+          $version = uv version --short
+          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+            throw "Tag $env:GITHUB_REF_NAME does not match pyproject.toml version $version"
+          }
+          "artifact=NetworkEd-$version" >> $env:GITHUB_OUTPUT
+
+      - name: Install UPX ${{ env.UPX_VERSION }}
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "upx.zip"
+          Invoke-WebRequest "https://github.com/upx/upx/releases/download/v$env:UPX_VERSION/upx-$env:UPX_VERSION-win64.zip" -OutFile $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($hash -ne $env:UPX_SHA256) { throw "UPX checksum mismatch: $hash" }
+          Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP
+          $dir = Join-Path $env:RUNNER_TEMP "upx-$env:UPX_VERSION-win64"
+          & (Join-Path $dir "upx.exe") --version
+          "UPX_DIR=$dir" >> $env:GITHUB_ENV
+
+      # The spec writes the exe's version resource: <version>.<run number>.
+      - name: Build exe
+        run: just build
+
+      - name: Show exe properties
+        shell: pwsh
+        run: (Get-Item dist/NetworkEd.exe).VersionInfo | Format-List FileVersion, ProductVersion, ProductName, FileDescription
+
+      # Download is a zip named NetworkEd-<version> containing only NetworkEd.exe.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.artifact }}
+          path: dist/NetworkEd.exe
+          if-no-files-found: error
+
+  release:
+    name: Attach exe to GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: NetworkEd.exe
+          generate_release_notes: true
