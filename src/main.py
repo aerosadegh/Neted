@@ -1,16 +1,61 @@
+import contextlib
+import ctypes
+import getpass
 import sys
+
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
-# Local imports
 from network import NetworkManager
-from ui import NetworkGadgetUI
+from resources import app_icon
+from ui import APP_NAME, MainWindow
+
+# One running copy per user. Debug runs use their own key so they don't hand off to the exe.
+_INSTANCE_KEY = f"network-ed-{getpass.getuser()}" + ("-debug" if NetworkManager.DEBUG_MODE else "")
 
 
-def main():
-    """Main execution function for the Network Gadget application."""
+def _notify_running_instance() -> bool:
+    """Asks an already running copy to show its window. Returns True if one answered."""
+    socket = QLocalSocket()
+    socket.connectToServer(_INSTANCE_KEY)
+    if not socket.waitForConnected(300):
+        return False
+    socket.write(b"show")
+    socket.waitForBytesWritten(300)
+    socket.disconnectFromServer()
+    return True
+
+
+def _listen_for_new_instances(window: MainWindow) -> QLocalServer:
+    """Shows the window whenever another copy of the app is started."""
+    server = QLocalServer(window)
+    if not server.listen(_INSTANCE_KEY):
+        QLocalServer.removeServer(_INSTANCE_KEY)  # stale socket from a crash
+        server.listen(_INSTANCE_KEY)
+
+    def on_new_connection() -> None:
+        connection = server.nextPendingConnection()
+        if connection is not None:
+            connection.disconnected.connect(connection.deleteLater)
+        window.show_window()
+
+    server.newConnection.connect(on_new_connection)
+    return server
+
+
+def main() -> None:
+    """Main execution function for the Network Ed application."""
+    # Own taskbar identity, so Windows shows our icon instead of python.exe's when run from source.
+    with contextlib.suppress(AttributeError, OSError):
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("NetworkEd.App")
+
     app = QApplication(sys.argv)
-    
+    app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
+    app.setWindowIcon(app_icon())
+
+    if _notify_running_instance():
+        return
 
     # Check system privileges before booting the UI
     if not NetworkManager.DEBUG_MODE and not NetworkManager.is_admin():
@@ -21,10 +66,10 @@ def main():
         )
         sys.exit(1)
 
-    window = NetworkGadgetUI()
+    window = MainWindow()
+    _listen_for_new_instances(window)  # parented to the window, so it lives as long as the app
     window.show()
 
-    # Execute the Qt event loop
     sys.exit(app.exec())
 
 

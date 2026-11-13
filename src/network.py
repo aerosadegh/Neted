@@ -1,16 +1,132 @@
+"""Reads and changes Windows network adapter settings through PowerShell.
+
+The PowerShell scripts below are fixed text. Values (adapter name, addresses) are passed
+in through NETED_* environment variables, never pasted into the script, so nothing a
+user types or a profile file contains can run as code in the elevated shell.
+"""
+
 import ctypes
+import json
 import os
 import subprocess
-from typing import List
+from dataclasses import dataclass
+from typing import Any
 
-# Local imports
-from models import NetworkProfile
+from models import NetworkProfile, clean, mask_to_prefix, parse_ipv4
+
+_POWERSHELL = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"]
+
+# UTF-8 output keeps non-ASCII adapter names intact; 'Stop' turns errors into failures.
+_PRELUDE = """\
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+$ErrorActionPreference = 'Stop'
+"""
+
+_LIST_ADAPTERS = """\
+$items = @(Get-NetAdapter | Select-Object Name, @{ n = 'Status'; e = { "$($_.Status)" } })
+ConvertTo-Json -InputObject $items -Compress
+"""
+
+_INTERFACE_STATUS = """\
+$adapter = $env:NETED_ADAPTER
+$ips = @(Get-NetIPAddress -InterfaceAlias $adapter -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    ForEach-Object { $_.IPAddress })
+$ipif = Get-NetIPInterface -InterfaceAlias $adapter -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+$dhcp = if ($ipif) { "$($ipif.Dhcp)" } else { $null }
+ConvertTo-Json -InputObject @{ Dhcp = $dhcp; Addresses = $ips } -Compress
+"""
+
+_APPLY_PROFILE = """\
+$adapter = $env:NETED_ADAPTER
+$null = Get-NetAdapter -Name $adapter
+
+if ($env:NETED_IP) {
+    $ip = $env:NETED_IP
+    $prefix = [int]$env:NETED_PREFIX
+    $gateway = $env:NETED_GATEWAY
+
+    # Refuse if another adapter already owns this IP.
+    $conflict = @(Get-NetIPAddress -IPAddress $ip -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object InterfaceAlias -ne $adapter)
+    if ($conflict.Count -gt 0) {
+        throw "IP address $ip is already used by adapter '$($conflict[0].InterfaceAlias)'."
+    }
+
+    # Switch to static addressing and drop the old default route.
+    Set-NetIPInterface -InterfaceAlias $adapter -AddressFamily IPv4 -Dhcp Disabled -ErrorAction SilentlyContinue
+    Remove-NetRoute -InterfaceAlias $adapter -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' `
+        -Confirm:$false -ErrorAction SilentlyContinue
+
+    # Remove every other IPv4 address on this adapter.
+    Get-NetIPAddress -InterfaceAlias $adapter -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object IPAddress -ne $ip |
+        Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+
+    $ipParams = @{ InterfaceAlias = $adapter; IPAddress = $ip; PrefixLength = $prefix }
+    $existing = Get-NetIPAddress -InterfaceAlias $adapter -IPAddress $ip -AddressFamily IPv4 `
+        -ErrorAction SilentlyContinue
+    if ($existing) {
+        Set-NetIPAddress @ipParams | Out-Null
+        if ($gateway) {
+            New-NetRoute -InterfaceAlias $adapter -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' `
+                -NextHop $gateway -Confirm:$false | Out-Null
+        }
+    } else {
+        if ($gateway) { $ipParams['DefaultGateway'] = $gateway }
+        New-NetIPAddress @ipParams | Out-Null
+    }
+}
+
+if ($env:NETED_DNS) {
+    Set-DnsClientServerAddress -InterfaceAlias $adapter -ServerAddresses ($env:NETED_DNS -split ',')
+} elseif ($env:NETED_IP) {
+    Set-DnsClientServerAddress -InterfaceAlias $adapter -ResetServerAddresses
+}
+"""
+
+_ENABLE_DHCP = """\
+$adapter = $env:NETED_ADAPTER
+$null = Get-NetAdapter -Name $adapter
+
+Remove-NetIPAddress -InterfaceAlias $adapter -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue
+Remove-NetRoute -InterfaceAlias $adapter -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' `
+    -Confirm:$false -ErrorAction SilentlyContinue
+Set-NetIPInterface -InterfaceAlias $adapter -AddressFamily IPv4 -Dhcp Enabled
+Set-DnsClientServerAddress -InterfaceAlias $adapter -ResetServerAddresses
+"""
+
+
+class PowerShellError(RuntimeError):
+    """A PowerShell command failed. The message is meant for the user."""
+
+
+@dataclass(frozen=True)
+class Adapter:
+    name: str
+    status: str  # "Up", "Disconnected", "Disabled", ...
+
+    @property
+    def is_up(self) -> bool:
+        return self.status == "Up"
+
+
+@dataclass(frozen=True)
+class InterfaceStatus:
+    dhcp_enabled: bool | None  # None when Windows didn't report it
+    addresses: tuple[str, ...]
+
+
+def _error_text(stderr: str) -> str:
+    """Keeps the message and drops PowerShell's 'At line:' / CategoryInfo trailer."""
+    text = stderr.strip()
+    return text.split("\nAt line:", 1)[0].strip() or text
 
 
 class NetworkManager:
-    """Handles all low-level system interactions for network configuration."""
+    """All system interaction for reading and changing adapter settings."""
 
-    DEBUG_MODE = os.getenv("NETWORK_GADGET_DEBUG", "False").lower() == "true"
+    DEBUG_MODE = os.getenv("NETWORK_ED_DEBUG", "").lower() == "true"
 
     @staticmethod
     def is_admin() -> bool:
@@ -20,183 +136,129 @@ class NetworkManager:
         except Exception:
             return False
 
-    @staticmethod
-    def get_network_interfaces() -> List[str]:
-        """Retrieves active network interface aliases via PowerShell."""
-        ps_command = "(Get-NetAdapter | Where-Object Status -eq 'Up').Name"
-        try:
-            result = subprocess.run(
-                ["powershell", "-Command", ps_command],
-                capture_output=True,
-                text=True,
-                check=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            return [line.strip() for line in result.stdout.split("\n") if line.strip()]
-        except subprocess.CalledProcessError:
-            return ["Ethernet", "Wi-Fi"]  # Fallback for UI testing if PS fails
+    # --- Read-only queries (always run, also in debug mode) ---
+
+    @classmethod
+    def get_network_interfaces(cls) -> list[Adapter]:
+        """All visible adapters, connected ones first."""
+        items = cls._run_json(_LIST_ADAPTERS)
+        if isinstance(items, dict):
+            items = [items]
+        adapters = [
+            Adapter(name=str(item["Name"]), status=str(item.get("Status") or "Unknown"))
+            for item in items or []
+            if isinstance(item, dict) and item.get("Name")
+        ]
+        # "Not Present" adapters are leftovers of removed hardware/VPNs and can't be configured.
+        adapters = [a for a in adapters if a.status != "Not Present"]
+        return sorted(adapters, key=lambda a: (not a.is_up, a.name.lower()))
+
+    @classmethod
+    def get_interface_status(cls, interface_name: str) -> InterfaceStatus:
+        """Current IPv4 addresses of an adapter and whether it uses DHCP."""
+        data = cls._run_json(_INTERFACE_STATUS, {"NETED_ADAPTER": interface_name})
+        if not isinstance(data, dict):
+            raise PowerShellError("Unexpected output from PowerShell while reading adapter status.")
+        dhcp = data.get("Dhcp")
+        addresses = data.get("Addresses") or []
+        if isinstance(addresses, str):
+            addresses = [addresses]
+        return InterfaceStatus(
+            dhcp_enabled=None if dhcp is None else dhcp == "Enabled",
+            addresses=tuple(str(a) for a in addresses),
+        )
+
+    # --- Changes (need admin; printed instead of run in debug mode) ---
 
     @staticmethod
-    def get_active_ip(interface_name: str) -> str:
-        """Fetches the currently applied IPv4 address for a given interface."""
-        ps_command = f"(Get-NetIPAddress -InterfaceAlias '{interface_name}' -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress"
-        try:
-            result = subprocess.run(
-                ["powershell", "-Command", ps_command],
-                capture_output=True,
-                text=True,
-                check=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            ip = result.stdout.strip()
-            return ip if ip else "Unconfigured / DHCP"
-        except subprocess.CalledProcessError:
-            return "Unknown"
+    def build_apply_command(
+        interface_name: str, profile: NetworkProfile
+    ) -> tuple[str, dict[str, str]]:
+        """Validates the profile and returns the script plus the environment it reads."""
+        if not interface_name:
+            raise ValueError("No network adapter selected.")
+        errors = profile.validate()
+        if errors:
+            raise ValueError("\n".join(errors))
+
+        env = {
+            "NETED_ADAPTER": interface_name,
+            "NETED_IP": "",
+            "NETED_PREFIX": "",
+            "NETED_GATEWAY": "",
+        }
+        if not profile.is_dns_only:
+            env["NETED_IP"] = parse_ipv4(profile.ip_address, "IP address")
+            env["NETED_PREFIX"] = str(mask_to_prefix(profile.subnet_mask))
+            if clean(profile.gateway):
+                env["NETED_GATEWAY"] = parse_ipv4(profile.gateway, "Gateway")
+
+        dns = [
+            parse_ipv4(value, "DNS server")
+            for value in (profile.dns_primary, profile.dns_secondary)
+            if clean(value)
+        ]
+        env["NETED_DNS"] = ",".join(dns)
+        return _APPLY_PROFILE, env
 
     @staticmethod
-    def _convert_mask_to_prefix(subnet_mask: str) -> int:
-        """Converts dotted decimal mask to CIDR prefix length."""
-        try:
-            return sum([bin(int(x)).count("1") for x in subnet_mask.split(".")])
-        except (ValueError, AttributeError):
-            raise ValueError(f"Invalid subnet mask: {subnet_mask}")
+    def build_dhcp_command(interface_name: str) -> tuple[str, dict[str, str]]:
+        if not interface_name:
+            raise ValueError("No network adapter selected.")
+        return _ENABLE_DHCP, {"NETED_ADAPTER": interface_name}
 
     @classmethod
     def apply_profile(cls, interface_name: str, profile: NetworkProfile) -> None:
-        """Applies a NetworkProfile to the system, gracefully handling existing IP objects."""
-        if not cls.DEBUG_MODE and not cls.is_admin():
-            raise PermissionError("Administrator privileges are required.")
-
-        ps_script = f"""
-        $ErrorActionPreference = "Stop"
-        $AdapterName = "{interface_name}"
-        """
-
-        is_dns_only = not (profile.ip_address and profile.ip_address.strip())
-
-        # --- BLOCK 1: IP & ROUTING ---
-        if not is_dns_only:
-            if not profile.subnet_mask or not profile.subnet_mask.strip():
-                raise ValueError(
-                    "A Subnet Mask is required if an IP Address is specified."
-                )
-
-            prefix_length = cls._convert_mask_to_prefix(profile.subnet_mask)
-            target_ip = profile.ip_address.strip()
-
-            ps_script += f"""
-        # 1. Defensively check for cross-adapter IP conflicts
-        $conflictIP = Get-NetIPAddress -IPAddress "{target_ip}" -AddressFamily IPv4 -ErrorAction SilentlyContinue
-        if ($conflictIP -and $conflictIP.InterfaceAlias -ne $AdapterName) {{
-            Write-Error "IP Address {target_ip} is already in use by another adapter: '$($conflictIP.InterfaceAlias)'. Cannot apply."
-            exit 1
-        }}
-
-        # 2. Disable DHCP to unlock the adapter completely
-        Set-NetIPInterface -InterfaceAlias $AdapterName -Dhcp Disabled -AddressFamily IPv4 -ErrorAction SilentlyContinue
-
-        # 3. Clear existing Gateway Routes
-        Remove-NetRoute -InterfaceAlias $AdapterName -DestinationPrefix "0.0.0.0/0" -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue
-
-        # 4. Check if target IP already exists on THIS adapter
-        $existingIP = Get-NetIPAddress -InterfaceAlias $AdapterName -IPAddress "{target_ip}" -AddressFamily IPv4 -ErrorAction SilentlyContinue
-        
-        # 5. Purge any OTHER IPs on this adapter to ensure a clean slate
-        Get-NetIPAddress -InterfaceAlias $AdapterName -AddressFamily IPv4 | Where-Object IPAddress -ne "{target_ip}" | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
-        
-        $ipParams = @{{
-            InterfaceAlias = $AdapterName
-            IPAddress = "{target_ip}"
-            PrefixLength = {prefix_length}
-        }}
-            """
-
-            if profile.gateway and profile.gateway.strip():
-                gateway = profile.gateway.strip()
-                ps_script += f"""
-        if ($existingIP) {{
-            # IP already exists: Modify the prefix and manually inject the Gateway route
-            Set-NetIPAddress @ipParams -ErrorAction Stop | Out-Null
-            New-NetRoute -InterfaceAlias $AdapterName -DestinationPrefix "0.0.0.0/0" -NextHop "{gateway}" -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-        }} else {{
-            # Fresh injection
-            $ipParams["DefaultGateway"] = "{gateway}"
-            New-NetIPAddress @ipParams -ErrorAction Stop | Out-Null
-        }}
-                """
-            else:
-                ps_script += """
-        if ($existingIP) {
-            Set-NetIPAddress @ipParams -ErrorAction Stop | Out-Null
-        } else {
-            New-NetIPAddress @ipParams -ErrorAction Stop | Out-Null
-        }
-                """
-        else:
-            ps_script += "\n        # DNS-Only Mode: Skipping IP and Routing wipe.\n"
-
-        # --- BLOCK 2: DNS CONFIGURATION ---
-        if profile.dns_primary and profile.dns_primary.strip():
-            dns_servers = f'"{profile.dns_primary.strip()}"'
-            if profile.dns_secondary and profile.dns_secondary.strip():
-                dns_servers += f', "{profile.dns_secondary.strip()}"'
-            ps_script += f"\n        Set-DnsClientServerAddress -InterfaceAlias $AdapterName -ServerAddresses {dns_servers}"
-        else:
-            if is_dns_only:
-                raise ValueError(
-                    "Cannot apply a completely blank profile. Specify IP settings, DNS settings, or both."
-                )
-
-            ps_script += "\n        Set-DnsClientServerAddress -InterfaceAlias $AdapterName -ResetServerAddresses"
-
-        if cls.DEBUG_MODE:
-            print(f"--- DRY RUN PS SCRIPT ---\n{ps_script}\n-----------------------")
-            return
-
-        try:
-            out = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_script],
-                capture_output=True,
-                text=True,
-                check=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            print(out)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"PowerShell Failed: {e.stderr.strip()}") from e
+        """Applies a profile to an adapter. DNS-only profiles leave IP settings alone."""
+        cls._run_change(*cls.build_apply_command(interface_name, profile))
 
     @classmethod
     def enable_dhcp(cls, interface_name: str) -> None:
-        """Reverts the specified interface back to DHCP for both IP and DNS."""
-        if not cls.DEBUG_MODE and not cls.is_admin():
-            raise PermissionError("Administrator privileges are required.")
+        """Switches an adapter back to DHCP for both IP and DNS."""
+        cls._run_change(*cls.build_dhcp_command(interface_name))
 
-        ps_script = f"""
-        $ErrorActionPreference = "Stop"
-        $AdapterName = "{interface_name}"
+    # --- Plumbing ---
 
-        # 1. Clear any existing static IPs and Gateway routes
-        Remove-NetIPAddress -InterfaceAlias $AdapterName -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue
-        Remove-NetRoute -InterfaceAlias $AdapterName -DestinationPrefix "0.0.0.0/0" -AddressFamily IPv4 -Confirm:$false -ErrorAction SilentlyContinue
-
-        # 2. Enable DHCP for IP address
-        Set-NetIPInterface -InterfaceAlias $AdapterName -Dhcp Enabled -AddressFamily IPv4 -ErrorAction Stop
-
-        # 3. Reset DNS to automatic (DHCP)
-        Set-DnsClientServerAddress -InterfaceAlias $AdapterName -ResetServerAddresses -ErrorAction Stop
-        """
-
+    @classmethod
+    def _run_change(cls, script: str, env: dict[str, str]) -> None:
         if cls.DEBUG_MODE:
-            print(f"--- DRY RUN DHCP SCRIPT ---\n{ps_script}\n-----------------------")
+            values = "\n".join(f"  {k}={v}" for k, v in env.items())
+            print(f"--- DRY RUN ---\n{values}\n{script}---------------")
             return
+        if not cls.is_admin():
+            raise PermissionError("Administrator privileges are required.")
+        cls._run(script, env)
 
+    @classmethod
+    def _run_json(cls, script: str, env: dict[str, str] | None = None) -> Any:
+        out = cls._run(script, env).strip()
+        if not out:
+            return None
         try:
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_script],
+            return json.loads(out)
+        except ValueError:
+            raise PowerShellError(f"Unexpected output from PowerShell:\n{out[:500]}") from None
+
+    @staticmethod
+    def _run(script: str, env: dict[str, str] | None = None) -> str:
+        try:
+            result = subprocess.run(
+                [*_POWERSHELL, _PRELUDE + script],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
+                env={**os.environ, **(env or {})},
                 check=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=120,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"PowerShell Failed: {e.stderr.strip()}") from e
+            raise PowerShellError(
+                _error_text(e.stderr or "") or f"PowerShell exited with code {e.returncode}."
+            ) from e
+        except subprocess.TimeoutExpired as e:
+            raise PowerShellError("PowerShell did not finish within 2 minutes.") from e
+        except OSError as e:
+            raise PowerShellError(f"Could not start PowerShell: {e}") from e
+        return result.stdout.lstrip("﻿")
