@@ -36,6 +36,7 @@ from models import (
     ProfileStoreError,
     clean,
 )
+from netwatch import NetworkChangeWatcher
 from network import Adapter, InterfaceStatus, NetworkManager
 from resources import app_icon
 from version import __version__
@@ -75,6 +76,10 @@ def describe_status(
     return f"Active: {text}"
 
 
+def adapter_label(adapter: Adapter) -> str:
+    return adapter.name if adapter.is_up else f"{adapter.name} ({adapter.status})"
+
+
 def _comparable(profile: NetworkProfile) -> tuple[str, ...]:
     """Profile values as the editor shows them, for spotting unsaved edits."""
     ip = clean(profile.ip_address)
@@ -101,6 +106,9 @@ class MainWindow(QMainWindow):
         self._is_quitting = False
         self._busy = False
         self._status_request = 0
+        self._adapters_loading = False
+        self._adapters_reload_queued = False
+        self._refresh_after_busy = False
         self._adapters: dict[str, Adapter] = {}
         self.current_profile: NetworkProfile | None = None
         self._current_item: QTreeWidgetItem | None = None
@@ -117,6 +125,10 @@ class MainWindow(QMainWindow):
         self._populate_tree()
         self._setup_system_tray()
         self.refresh_adapters()
+
+        # Re-scan by itself when adapters appear/disappear, (dis)connect or change address.
+        self._watcher = NetworkChangeWatcher(self)
+        self._watcher.changed.connect(self._on_network_changed)
 
         if load_error:
             QTimer.singleShot(
@@ -166,7 +178,10 @@ class MainWindow(QMainWindow):
 
         self.btn_refresh = QPushButton(" Refresh")
         self.btn_refresh.setIcon(qta.icon("fa5s.sync-alt", color="#888"))
-        self.btn_refresh.clicked.connect(self.refresh_adapters)
+        self.btn_refresh.setToolTip(
+            "Reload profiles from network_profiles.json and re-scan network adapters"
+        )
+        self.btn_refresh.clicked.connect(self._on_refresh_clicked)
 
         top_row.addWidget(QLabel("Interface:"))
         top_row.addWidget(self.interface_combo, 1)
@@ -341,12 +356,14 @@ class MainWindow(QMainWindow):
         if not self._resolve_unsaved_changes():
             return
         self._is_quitting = True
+        self._watcher.stop()
         self.tray_icon.hide()
         QApplication.quit()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Closing the window hides it to the tray; Quit in the tray menu exits."""
         if self._is_quitting:
+            self._watcher.stop()
             event.accept()
             return
         event.ignore()
@@ -363,9 +380,33 @@ class MainWindow(QMainWindow):
     def _selected_adapter(self) -> str:
         return self.interface_combo.currentData() or ""
 
-    def refresh_adapters(self) -> None:
-        """Reloads the adapter list (in the background), then the status line."""
-        self.lbl_active_ip.setText("Active: Scanning...")
+    def _on_refresh_clicked(self) -> None:
+        """Refresh button: re-read the profile library, then re-scan adapters."""
+        if self.reload_profiles():
+            self.statusBar().showMessage(
+                f"Reloaded {len(self.groups)} group(s) from {ProfileStore.FILE_PATH.name}.", 4000
+            )
+        self.refresh_adapters()
+
+    def _on_network_changed(self) -> None:
+        """Windows reported an adapter or address change."""
+        if self._busy:
+            self._refresh_after_busy = True  # our own Apply/DHCP is still changing things
+            return
+        self.statusBar().showMessage("Network change detected, updating...", 3000)
+        self.refresh_adapters(quiet=True)
+
+    def refresh_adapters(self, quiet: bool = False) -> None:
+        """Reloads the adapter list (in the background), then the status line.
+
+        If a load is already running, one more runs after it, so the newest state wins.
+        """
+        if self._adapters_loading:
+            self._adapters_reload_queued = True
+            return
+        self._adapters_loading = True
+        if not quiet:
+            self.lbl_active_ip.setText("Active: Scanning...")
         self._tasks.run(
             NetworkManager.get_network_interfaces,
             self._on_adapters_loaded,
@@ -373,26 +414,43 @@ class MainWindow(QMainWindow):
         )
 
     def _on_adapters_loaded(self, adapters: list[Adapter]) -> None:
+        combo = self.interface_combo
         previous = self._selected_adapter()
         self._adapters = {a.name: a for a in adapters}
+        names = [a.name for a in adapters]
 
-        self.interface_combo.blockSignals(True)
-        self.interface_combo.clear()
-        for adapter in adapters:
-            label = adapter.name if adapter.is_up else f"{adapter.name} ({adapter.status})"
-            self.interface_combo.addItem(label, adapter.name)
-        index = self.interface_combo.findData(previous)
-        self.interface_combo.setCurrentIndex(index if index >= 0 else 0)
-        self.interface_combo.blockSignals(False)
+        if names == [combo.itemData(i) for i in range(combo.count())]:
+            # Same adapters in the same order: only update labels, so an open
+            # dropdown stays open and the selection is untouched.
+            for i, adapter in enumerate(adapters):
+                combo.setItemText(i, adapter_label(adapter))
+        else:
+            combo.blockSignals(True)
+            combo.clear()
+            for adapter in adapters:
+                combo.addItem(adapter_label(adapter), adapter.name)
+            index = combo.findData(previous)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+            combo.blockSignals(False)
+            if previous and previous not in self._adapters:
+                self.statusBar().showMessage(f"Adapter '{previous}' is no longer available.", 6000)
 
         if adapters:
             self.refresh_status()
         else:
             self.lbl_active_ip.setText("Active: No network adapters found")
+        self._adapters_load_finished()
 
     def _on_adapters_failed(self, exc: Exception) -> None:
         self.lbl_active_ip.setText("Active: Could not list network adapters")
         self.statusBar().showMessage(f"Could not list network adapters: {exc}", 8000)
+        self._adapters_load_finished()
+
+    def _adapters_load_finished(self) -> None:
+        self._adapters_loading = False
+        if self._adapters_reload_queued:
+            self._adapters_reload_queued = False
+            self.refresh_adapters(quiet=True)
 
     def refresh_status(self) -> None:
         """Reads the selected adapter's current IP settings in the background."""
@@ -419,6 +477,52 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Could not read adapter status: {exc}", 8000)
 
     # ------------------------------------------------------------------- tree
+
+    def reload_profiles(self) -> bool:
+        """Re-reads network_profiles.json. Returns False if the library was left as it was."""
+        if self.has_unsaved_changes():
+            choice = QMessageBox.question(
+                self,
+                "Unsaved changes",
+                f"Reloading discards your unsaved changes to '{self.current_profile.name}'.\n"
+                "Reload anyway?",
+                _Button.Discard | _Button.Cancel,
+                _Button.Cancel,
+            )
+            if choice != _Button.Discard:
+                return False
+        try:
+            groups = ProfileStore.load()
+        except ProfileStoreError as e:
+            QMessageBox.warning(
+                self, "Profiles not reloaded", f"{e}\n\nThe profiles on screen were kept."
+            )
+            return False
+
+        selected = self._selected_profile_key()
+        self._clear_editor()  # before the tree is rebuilt, so nothing counts as unsaved
+        self.groups = groups
+        self._populate_tree()
+        self._select_profile_key(selected)
+        return True
+
+    def _selected_profile_key(self) -> tuple[str, str] | None:
+        item = self._current_item
+        if item is None or item.parent() is None:
+            return None
+        return item.parent().text(0), item.text(0)
+
+    def _select_profile_key(self, key: tuple[str, str] | None) -> None:
+        if key is None:
+            return
+        for g in range(self.tree.topLevelItemCount()):
+            group_item = self.tree.topLevelItem(g)
+            if group_item.text(0) != key[0]:
+                continue
+            for p in range(group_item.childCount()):
+                if group_item.child(p).text(0) == key[1]:
+                    self.tree.setCurrentItem(group_item.child(p))
+                    return
 
     def _populate_tree(self) -> None:
         self.tree.clear()
@@ -704,10 +808,17 @@ class MainWindow(QMainWindow):
     def _on_change_done(self, message: str) -> None:
         self._set_busy(False)
         self.statusBar().showMessage(message, 6000)
-        self.refresh_status()
+        self._refresh_after_change()
 
     def _on_change_failed(self, title: str, exc: Exception) -> None:
         self._set_busy(False)
         self.statusBar().clearMessage()
         QMessageBox.critical(self, title, str(exc))
-        self.refresh_status()
+        self._refresh_after_change()
+
+    def _refresh_after_change(self) -> None:
+        if self._refresh_after_busy:
+            self._refresh_after_busy = False
+            self.refresh_adapters(quiet=True)  # also refreshes the status line
+        else:
+            self.refresh_status()
