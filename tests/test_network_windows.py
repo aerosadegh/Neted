@@ -1,10 +1,14 @@
+"""Windows backend. PowerShell is always faked, so these also run on Linux."""
+
 import subprocess
 
 import pytest
 
-import network
+import network_windows as network
 from models import NetworkProfile
-from network import Adapter, InterfaceStatus, NetworkManager, PowerShellError
+from netcommon import Adapter, InterfaceStatus
+from network_windows import PowerShellError
+from network_windows import WindowsNetwork as NetworkManager
 
 
 @pytest.fixture

@@ -60,8 +60,9 @@ def main() -> None:
         if _notify_running_instance():
             return
 
-        # Check system privileges before booting the UI
-        if not NetworkManager.DEBUG_MODE and not NetworkManager.is_admin():
+        # Windows needs admin rights up front; on Linux NetworkManager decides per change.
+        needs_admin = NetworkManager.REQUIRES_ADMIN and not NetworkManager.DEBUG_MODE
+        if needs_admin and not NetworkManager.is_admin():
             QMessageBox.critical(
                 None,
                 "Privilege Error",
