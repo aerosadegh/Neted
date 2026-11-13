@@ -4,7 +4,7 @@ import ipaddress
 from dataclasses import fields, replace
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction, QCloseEvent
+from PyQt6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -43,6 +43,7 @@ from version import __version__
 from worker import TaskRunner
 
 APP_NAME = "Network Ed"
+REPO_URL = "https://github.com/aerosadegh/Neted"
 _DATA = Qt.ItemDataRole.UserRole
 _Button = QMessageBox.StandardButton
 
@@ -91,6 +92,37 @@ def index_of(items: list, obj: object) -> int:
 
 def adapter_label(adapter: Adapter) -> str:
     return adapter.name if adapter.is_up else f"{adapter.name} ({adapter.status})"
+
+
+def about_html() -> str:
+    return (
+        f"<h3>{APP_NAME} - Pro Edition</h3>"
+        f"<p>Version {__version__}</p>"
+        "<p>Quickly swap Windows network profiles.</p>"
+        f'<p>Source code: <a href="{REPO_URL}">{REPO_URL.removeprefix("https://")}</a><br>'
+        "License: AGPL-3.0</p>"
+    )
+
+
+def group_matches(group: ProfileGroup, terms: list[str]) -> bool:
+    """True if every (lower-case) search term is part of the group name."""
+    name = group.name.lower()
+    return all(term in name for term in terms)
+
+
+def profile_matches(group: ProfileGroup, profile: NetworkProfile, terms: list[str]) -> bool:
+    """True if every search term is found in the group name or the profile's name,
+    IP address, gateway or DNS servers (so "site 10.6" narrows to one site's subnet)."""
+    values = (
+        group.name,
+        profile.name,
+        profile.ip_address,
+        profile.gateway,
+        profile.dns_primary,
+        profile.dns_secondary,
+    )
+    haystack = " ".join(clean(v).lower() for v in values)
+    return all(term in haystack for term in terms)
 
 
 def _comparable(profile: NetworkProfile) -> tuple[str, ...]:
@@ -217,6 +249,29 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(0)
+
+        self.txt_filter = QLineEdit()
+        self.txt_filter.setPlaceholderText("Search  (Ctrl+F)")
+        self.txt_filter.setToolTip(
+            "Filter by group or profile name, IP address, gateway or DNS.\n"
+            "Several words must all match. Enter opens the first match, Esc clears."
+        )
+        self.txt_filter.setClearButtonEnabled(True)
+        self.txt_filter.addAction(
+            icons.icon("fa5s.search", color="#888"), QLineEdit.ActionPosition.LeadingPosition
+        )
+        self.txt_filter.setStyleSheet("QLineEdit { padding: 2px; }")
+        self.txt_filter.textChanged.connect(self.apply_filter)
+        self.txt_filter.returnPressed.connect(self._open_first_match)
+        left_layout.addWidget(self.txt_filter)
+
+        QShortcut(QKeySequence.StandardKey.Find, self, activated=self._focus_filter)
+        QShortcut(
+            QKeySequence(Qt.Key.Key_Escape),
+            self.txt_filter,
+            activated=self.txt_filter.clear,
+            context=Qt.ShortcutContext.WidgetShortcut,
+        )
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabel("Profile Library")
@@ -354,12 +409,8 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def _show_about(self) -> None:
-        QMessageBox.information(
-            self,
-            f"About {APP_NAME}",
-            f"{APP_NAME} - Pro Edition\nVersion {__version__}\n\n"
-            "Quickly swap Windows network profiles.",
-        )
+        # QMessageBox.about shows the app icon and opens links in the default browser.
+        QMessageBox.about(self, f"About {APP_NAME}", about_html())
 
     def _on_tray_icon_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
@@ -545,6 +596,69 @@ class MainWindow(QMainWindow):
             group_item = self._group_item(group)
             self.tree.addTopLevelItem(group_item)
             group_item.setExpanded(True)
+        self.apply_filter()
+
+    # ----------------------------------------------------------------- search
+
+    def apply_filter(self) -> None:
+        """Shows only groups/profiles matching the search box. The open profile stays."""
+        text = self.txt_filter.text().strip()
+        terms = text.lower().split()
+        matches = total = 0
+        for g in range(self.tree.topLevelItemCount()):
+            group_item = self.tree.topLevelItem(g)
+            group: ProfileGroup = group_item.data(0, _DATA)
+            shown = 0
+            total += group_item.childCount()
+            for p in range(group_item.childCount()):
+                item = group_item.child(p)
+                visible = (
+                    not terms
+                    or item is self._current_item
+                    or profile_matches(group, item.data(0, _DATA), terms)
+                )
+                item.setHidden(not visible)
+                shown += visible
+            group_item.setHidden(not (shown or group_matches(group, terms)))
+            if terms and shown:
+                group_item.setExpanded(True)
+            matches += shown
+
+        # Short: the left pane is narrow.
+        self.tree.setHeaderLabel(
+            f"{matches} of {total} profile{'s' if total != 1 else ''}"
+            if terms
+            else "Profile Library"
+        )
+        if (
+            terms
+            and not matches
+            and all(
+                self.tree.topLevelItem(g).isHidden() for g in range(self.tree.topLevelItemCount())
+            )
+        ):
+            self.statusBar().showMessage(f"Nothing matches '{text}'.", 3000)
+
+    def _focus_filter(self) -> None:
+        self.txt_filter.setFocus()
+        self.txt_filter.selectAll()
+
+    def _open_first_match(self) -> None:
+        for g in range(self.tree.topLevelItemCount()):
+            group_item = self.tree.topLevelItem(g)
+            if group_item.isHidden():
+                continue
+            for p in range(group_item.childCount()):
+                if not group_item.child(p).isHidden():
+                    self.tree.setCurrentItem(group_item.child(p))
+                    self.tree.setFocus()
+                    return
+
+    def _reveal(self, item: QTreeWidgetItem) -> None:
+        """Clears the search if it hides an item the user just created."""
+        parent = item.parent()
+        if item.isHidden() or (parent is not None and parent.isHidden()):
+            self.txt_filter.clear()
 
     @staticmethod
     def _profile_item(profile: NetworkProfile) -> QTreeWidgetItem:
@@ -575,6 +689,7 @@ class MainWindow(QMainWindow):
             self.groups.append(ProfileGroup(name=name, profiles=[]))
             self._persist()
             self._populate_tree()
+            self._reveal(self.tree.topLevelItem(self.tree.topLevelItemCount() - 1))
 
     def _on_tree_selection(self) -> None:
         selected = self.tree.selectedItems()
@@ -590,6 +705,8 @@ class MainWindow(QMainWindow):
             self._load_profile(item, data)
         else:
             self._clear_editor()
+        if self.txt_filter.text().strip():
+            self.apply_filter()  # the profile just left is no longer kept visible
 
     def _select_silently(self, item: QTreeWidgetItem | None) -> None:
         self.tree.blockSignals(True)
@@ -664,6 +781,7 @@ class MainWindow(QMainWindow):
         self.tree.insertTopLevelItem(index, copy_item)
         copy_item.setExpanded(True)
         self.tree.setCurrentItem(copy_item)
+        self._reveal(copy_item)
         self.statusBar().showMessage(f"Duplicated group '{group.name}' as '{copy.name}'.", 4000)
 
     def _add_new_profile_to_group(self, group_item: QTreeWidgetItem, group: ProfileGroup) -> None:

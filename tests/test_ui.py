@@ -395,3 +395,101 @@ def test_self_test_report(qapp, window, tmp_path, monkeypatch):
     assert report["adapters"] == ["Ethernet", "Wi-Fi"]
     assert report["app_icon"] and report["fa5s_icon"]
     assert exits == [0]
+
+
+# --- search box -----------------------------------------------------------------
+
+
+def visible_names(w):
+    """The tree as shown: group names, then '  profile' lines, skipping hidden items."""
+    out = []
+    for g in range(w.tree.topLevelItemCount()):
+        group_item = w.tree.topLevelItem(g)
+        if group_item.isHidden():
+            continue
+        out.append(group_item.text(0))
+        for p in range(group_item.childCount()):
+            if not group_item.child(p).isHidden():
+                out.append("  " + group_item.child(p).text(0))
+    return out
+
+
+def add_lab_group(w):
+    lab = NetworkProfile("printer", ip_address="192.168.1.50", subnet_mask="255.255.255.0")
+    w.groups.append(ProfileGroup("Lab", [lab]))
+    w._populate_tree()
+
+
+def test_profile_matches_name_ip_gateway_dns_and_group():
+    group = ProfileGroup("Kahak", [])
+    sw = NetworkProfile(
+        "sw", ip_address="10.6.160.25", gateway="10.6.160.62", dns_primary="1.1.1.1"
+    )
+    for terms in (["sw"], ["10.6.160"], ["160.62"], ["1.1.1.1"], ["kahak"], ["kahak", "10.6"]):
+        assert ui.profile_matches(group, sw, terms), terms
+    assert not ui.profile_matches(group, sw, ["kahak", "192.168"])
+    assert not ui.profile_matches(group, sw, ["255"]), "subnet masks would match everything"
+
+
+def test_search_filters_by_name_ip_and_dns(qapp, window):
+    add_lab_group(window)
+    window.txt_filter.setText("SW")
+    assert visible_names(window) == ["Site", "  sw"]
+    window.txt_filter.setText("192.168")
+    assert visible_names(window) == ["Lab", "  printer"]
+    window.txt_filter.setText("1.1.1.1")
+    assert visible_names(window) == ["Site", "  dns"]
+    assert window.tree.headerItem().text(0) == "1 of 3 profiles"
+    window.txt_filter.clear()
+    assert visible_names(window) == ["Site", "  sw", "  dns", "Lab", "  printer"]
+    assert window.tree.headerItem().text(0) == "Profile Library"
+
+
+def test_search_group_name_and_combined_words(qapp, window):
+    add_lab_group(window)
+    window.txt_filter.setText("site")
+    assert visible_names(window) == ["Site", "  sw", "  dns"]
+    window.txt_filter.setText("site 10.0")
+    assert visible_names(window) == ["Site", "  sw"]
+    window.txt_filter.setText("no-such-thing")
+    assert visible_names(window) == []
+    assert "Nothing matches 'no-such-thing'" in window.statusBar().currentMessage()
+
+
+def test_open_profile_stays_visible_while_searching(qapp, window):
+    select(window, 0, 0)  # sw
+    window.txt_filter.setText("dns")
+    assert visible_names(window) == ["Site", "  sw", "  dns"]
+    select(window, 0, 1)  # move to dns: sw no longer matches, so it is hidden now
+    assert visible_names(window) == ["Site", "  dns"]
+
+
+def test_enter_opens_first_match(qapp, window):
+    window.txt_filter.setText("dns")
+    window.txt_filter.returnPressed.emit()
+    assert window.current_profile.name == "dns"
+
+
+def test_new_group_hidden_by_search_clears_it(qapp, window, monkeypatch):
+    monkeypatch.setattr(ui.QInputDialog, "getText", lambda *a, **k: ("Zeta", True))
+    window.txt_filter.setText("sw")
+    window._add_group()
+    assert window.txt_filter.text() == ""
+    assert "Zeta" in visible_names(window)
+
+
+def test_search_survives_refresh(qapp, window):
+    window.txt_filter.setText("dns")
+    window._on_refresh_clicked()
+    settle(qapp, window)
+    assert visible_names(window) == ["Site", "  dns"]
+
+
+def test_about_links_to_the_repo(qapp, window, monkeypatch):
+    shown = []
+    monkeypatch.setattr(ui.QMessageBox, "about", lambda *a: shown.append(a))
+    window._show_about()
+    title, html = shown[0][1], shown[0][2]
+    assert title == "About Network Ed"
+    assert '<a href="https://github.com/aerosadegh/Neted">' in html
+    assert f"Version {ui.__version__}" in html

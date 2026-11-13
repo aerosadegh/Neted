@@ -9,6 +9,7 @@ Switch a Windows network adapter between saved IP/DNS profiles and DHCP in one c
 - Plugging in a cable or USB adapter, unplugging it, or getting a new address is picked up automatically, with no need to press Refresh.
 - **Refresh** also reloads `network_profiles.json`, so edits made to the file outside the app show up.
 - Right-click a profile or group to **duplicate** it (or to add or delete).
+- **Search** above the list (Ctrl+F) filters groups and profiles by name, IP, gateway or DNS. Several words must all match, e.g. `kahak 10.6`.
 
 Windows 10/11 only. The app needs administrator rights to change adapter settings, and the exe asks for them when it starts.
 
