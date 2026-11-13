@@ -13,10 +13,11 @@ just check          # ruff check + ruff format --check + pytest
 just test -k mask   # pytest, extra args passed through
 just fmt            # ruff --fix and format
 just build          # PyInstaller -> dist/NetworkEd.exe
+just package        # build + scripts/package.py -> dist/NetworkEd-<version>.zip
 just icon           # assets/icon.svg -> assets/icon.ico
 ```
 
-Run `just check` before committing. CI (`.github/workflows/build.yml`, `windows-latest`) runs lint and tests on pull requests. On `v*` tags it also builds the exe (UPX, pinned and checksummed) and attaches it to a release. The tag must equal `v` + the `pyproject.toml` version.
+Run `just check` before committing. CI (`.github/workflows/build.yml`, `windows-latest`) runs lint and tests on pull requests. On `v*` tags it also runs `just package` (UPX pinned and checksummed). It uploads the `NetworkEd-<version>/` folder as an artifact and attaches `NetworkEd-<version>.zip` to a GitHub release. The tag must equal `v` + the `pyproject.toml` version.
 
 ## Layout
 
@@ -25,6 +26,8 @@ Run `just check` before committing. CI (`.github/workflows/build.yml`, `windows-
 - `src/network.py`: `NetworkManager`. Fixed PowerShell scripts plus the parsing of their JSON output.
 - `src/models.py`: `NetworkProfile` (with `validate()`), `ProfileGroup`, `ProfileStore` (JSON load and save), and the IP/mask helpers.
 - `src/worker.py`: `TaskRunner`. Runs blocking calls on a thread pool and calls back on the GUI thread.
+- `src/netwatch.py`: `NetworkChangeWatcher`. Windows IP Helper change notifications (ctypes). Callbacks come in on Windows threads and are debounced (1 s) into one `changed` signal on the GUI thread, which makes the UI re-scan adapters.
+- `scripts/package.py`: release packing (folder + zip; writes `$GITHUB_OUTPUT` in CI). `scripts/make_icon.py`: SVG → ICO.
 - `src/resources.py`: bundled-file paths (`sys._MEIPASS` when frozen) and `app_icon()`, rendered from the SVG.
 - `src/version.py`: `__version__`. It must equal `[project].version` in `pyproject.toml` (a test checks).
 - `NetworkEd.spec`: PyInstaller build. It reads the version from `pyproject.toml` and writes the exe's version resource.
@@ -34,6 +37,8 @@ Run `just check` before committing. CI (`.github/workflows/build.yml`, `windows-
 
 - **Never put values into PowerShell script text.** Scripts in `network.py` are constants. Pass values through `NETED_*` environment variables and validate them first with `models.parse_ipv4` / `mask_to_prefix`. Always call through `NetworkManager._run`, which adds `-NoProfile`, UTF-8 output and `CREATE_NO_WINDOW`.
 - **Never call PowerShell on the GUI thread.** Use `self._tasks.run(fn, on_success, on_error)`. Changes to the system set `_busy`, which disables the action buttons.
+- **Network watcher callbacks.** They run on Windows threads: only emit a signal there, never block or touch widgets. Each ctypes callback stays in `netwatch._registered_callbacks` until `CancelMibChangeNotify2`, because freeing it earlier crashes the process. Call `stop()` before the window goes away.
+- **List membership by identity.** Duplicated profiles and groups compare equal, so find, remove and insert by identity (`ui.index_of`), never with `list.remove` or `list.index`.
 - **Don't apply profiles or DHCP for real without asking the user.** These change the machine's live adapter. Test `network.py` changes with `just dev` (it prints the script and its env values) or with unit tests that fake `_run`. The read-only queries (list adapters, read status) are safe to run.
 - **Profiles file.** `network_profiles.json` lives next to the exe (`models.app_dir()`); from source it is the repo root. It must stay next to the exe: don't move it to AppData. It contains real site addresses, so don't paste its contents anywhere.
 - **Saving.** `ProfileStore.save` is atomic and raises `ProfileStoreError`; the UI shows that error. `load` backs up an unreadable file and raises, instead of returning an empty list that the next save would write over the user's data.
