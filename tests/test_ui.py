@@ -369,3 +369,29 @@ def test_delete_removes_the_clicked_profile_not_an_equal_one(qapp, window, monke
     window._delete_profile(window.tree.topLevelItem(0).child(1), twin)
     assert group.profiles[0] is first
     assert len(group.profiles) == 2
+
+
+# --- self-test mode (used by CI on the built exe) ---------------------------------
+
+
+def test_self_test_report(qapp, window, tmp_path, monkeypatch):
+    import selftest
+
+    assert selftest.report_path(["exe", "--self-test=r.json"]).name == "r.json"
+    assert selftest.report_path(["exe"]) is None
+
+    exits = []
+    monkeypatch.setattr(selftest.QApplication, "exit", lambda code=0: exits.append(code))
+    report_file = tmp_path / "report.json"
+    selftest.start(window, report_file)
+    for _ in range(20):
+        qapp.processEvents()
+        if exits:
+            break
+        __import__("time").sleep(0.05)
+
+    report = json.loads(report_file.read_text(encoding="utf-8"))
+    assert report["ok"] is True, report
+    assert report["adapters"] == ["Ethernet", "Wi-Fi"]
+    assert report["app_icon"] and report["fa5s_icon"]
+    assert exits == [0]

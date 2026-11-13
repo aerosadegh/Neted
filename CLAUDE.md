@@ -14,6 +14,7 @@ just test -k mask   # pytest, extra args passed through
 just fmt            # ruff --fix and format
 just build          # PyInstaller -> dist/NetworkEd.exe
 just package        # build + scripts/package.py -> dist/NetworkEd-<version>.zip
+just selftest       # run dist/NetworkEd.exe --self-test headless (CI does this before release)
 just icon           # assets/icon.svg -> assets/icon.ico
 ```
 
@@ -27,6 +28,8 @@ Run `just check` before committing. CI (`.github/workflows/build.yml`, `windows-
 - `src/models.py`: `NetworkProfile` (with `validate()`), `ProfileGroup`, `ProfileStore` (JSON load and save), and the IP/mask helpers.
 - `src/worker.py`: `TaskRunner`. Runs blocking calls on Python worker threads and calls back on the GUI thread through one signal. Don't switch it to `QThreadPool` or per-job QObjects: those caused an exit deadlock and an access violation.
 - `src/netwatch.py`: `NetworkChangeWatcher`. Windows IP Helper change notifications (ctypes). Callbacks come in on Windows threads and are debounced (1 s) into one `changed` signal on the GUI thread, which makes the UI re-scan adapters.
+- `src/icons.py`: Font Awesome 5 Solid icons through qtawesome's `IconicFont`, loading only that font.
+- `src/selftest.py`: `--self-test=report.json`. Starts headless, waits for the adapter scan, writes a JSON report and exits 0 or 1. Read-only.
 - `scripts/package.py`: release packing (folder + zip; writes `$GITHUB_OUTPUT` in CI). `scripts/make_icon.py`: SVG → ICO.
 - `src/resources.py`: bundled-file paths (`sys._MEIPASS` when frozen) and `app_icon()`, rendered from the SVG.
 - `src/version.py`: `__version__`, read from `pyproject.toml`, the only place the version is set (the spec bundles that file into the exe). Bump with `uv version --bump …`.
@@ -38,6 +41,8 @@ Run `just check` before committing. CI (`.github/workflows/build.yml`, `windows-
 - **Never put values into PowerShell script text.** Scripts in `network.py` are constants. Pass values through `NETED_*` environment variables and validate them first with `models.parse_ipv4` / `mask_to_prefix`. Always call through `NetworkManager._run`, which adds `-NoProfile`, UTF-8 output and `CREATE_NO_WINDOW`.
 - **Never call PowerShell on the GUI thread.** Use `self._tasks.run(fn, on_success, on_error)`. Changes to the system set `_busy`, which disables the action buttons.
 - **Network watcher callbacks.** They run on Windows threads: only emit a signal there, never block or touch widgets. Each ctypes callback stays in `netwatch._registered_callbacks` until `CancelMibChangeNotify2`, because freeing it earlier crashes the process. Call `stop()` before the window goes away.
+- **Icons.** Use `icons.icon("fa5s.…")`, never `qtawesome.icon()`. The exe bundles only the Font Awesome 5 Solid font, and `qta.icon()` opens all of qtawesome's fonts, so it fails in the exe.
+- **Exe size.** `NetworkEd.spec` drops unused Qt files (`DROP_FILES`, `DROP_DIRS`, `KEEP_PLUGINS`) and excludes `ssl`/`_hashlib`. If new code needs one of them (an image format, HTTPS, a Qt module), update the spec, then check the build with `just selftest`. To run the self-test without elevation, build with `NETED_NO_UAC=1`. UPX can't compress Qt's CFG-protected DLLs; don't force it.
 - **List membership by identity.** Duplicated profiles and groups compare equal, so find, remove and insert by identity (`ui.index_of`), never with `list.remove` or `list.index`.
 - **Don't apply profiles or DHCP for real without asking the user.** These change the machine's live adapter. Test `network.py` changes with `just dev` (it prints the script and its env values) or with unit tests that fake `_run`. The read-only queries (list adapters, read status) are safe to run.
 - **Profiles file.** `network_profiles.json` lives next to the exe (`models.app_dir()`); from source it is the repo root. It must stay next to the exe: don't move it to AppData. It contains real site addresses, so don't paste its contents anywhere.

@@ -36,9 +36,17 @@ check: lint test
 # Folder containing upx.exe; override with the UPX_DIR environment variable
 upx_dir := env("UPX_DIR", "C:/upx-5.1.1")
 
-# Build dist/NetworkEd.exe (compressed with UPX when upx_dir has upx.exe)
+# Build dist/NetworkEd.exe (unused Qt parts trimmed; UPX for the files it can safely pack)
 build:
     uv run pyinstaller --noconfirm --clean --upx-dir "{{ upx_dir }}" NetworkEd.spec
+
+# Start the built exe headless, check it loads, write dist/self-test.json (read-only).
+# Needs an elevated terminal, or a test build made with `$env:NETED_NO_UAC=1; just build`.
+selftest:
+    $env:QT_QPA_PLATFORM = "offscreen"; \
+    $p = Start-Process dist/NetworkEd.exe -ArgumentList "--self-test=$PWD/dist/self-test.json" -PassThru -Wait; \
+    Get-Content dist/self-test.json; \
+    exit $p.ExitCode
 
 # Build, then pack dist/NetworkEd-<version>.zip (a NetworkEd-<version> folder holding the exe)
 package: build

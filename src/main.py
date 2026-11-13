@@ -6,6 +6,7 @@ import sys
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
+import selftest
 from network import NetworkManager
 from resources import app_icon
 from ui import APP_NAME, MainWindow
@@ -54,20 +55,25 @@ def main() -> None:
     app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(app_icon())
 
-    if _notify_running_instance():
-        return
+    self_test = selftest.report_path(sys.argv)  # read-only startup check used by CI
+    if self_test is None:
+        if _notify_running_instance():
+            return
 
-    # Check system privileges before booting the UI
-    if not NetworkManager.DEBUG_MODE and not NetworkManager.is_admin():
-        QMessageBox.critical(
-            None,
-            "Privilege Error",
-            "This application requires Administrator privileges to alter network adapters.",
-        )
-        sys.exit(1)
+        # Check system privileges before booting the UI
+        if not NetworkManager.DEBUG_MODE and not NetworkManager.is_admin():
+            QMessageBox.critical(
+                None,
+                "Privilege Error",
+                "This application requires Administrator privileges to alter network adapters.",
+            )
+            sys.exit(1)
 
     window = MainWindow()
-    _listen_for_new_instances(window)  # parented to the window, so it lives as long as the app
+    if self_test is None:
+        _listen_for_new_instances(window)  # parented to the window, so it lives with the app
+    else:
+        selftest.start(window, self_test)
     window.show()
 
     sys.exit(app.exec())

@@ -32,8 +32,11 @@ just check    # ruff lint + format check, then pytest
 just fmt      # auto-fix lint issues and format
 just build    # build dist/NetworkEd.exe (UPX from C:/upx-5.1.1 or $UPX_DIR, if present)
 just package  # build, then pack dist/NetworkEd-<version>.zip like the release
+just selftest # start the built exe headless and check it works (elevated terminal)
 just icon     # regenerate assets/icon.ico after editing assets/icon.svg
 ```
+
+The exe is about 22 MB, almost all of it Qt and Python. UPX can't shrink the Qt DLLs: they use Control Flow Guard, which UPX breaks, so PyInstaller skips them. `NetworkEd.spec` keeps the exe small by leaving out what the app never uses (software OpenGL, PDF support, OpenSSL, translations, extra icon fonts and plugins).
 
 To release: `uv version --bump patch` (or `minor` / `major`; `pyproject.toml` is the only place the version lives), commit, then push a tag `v<version>`.
 

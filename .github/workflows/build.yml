@@ -91,7 +91,15 @@ jobs:
 
       - name: Show exe properties
         shell: pwsh
-        run: (Get-Item dist/NetworkEd.exe).VersionInfo | Format-List FileVersion, ProductVersion, ProductName, FileDescription
+        run: |
+          (Get-Item dist/NetworkEd.exe).VersionInfo | Format-List FileVersion, ProductVersion, ProductName, FileDescription
+          "Size: {0:N1} MB" -f ((Get-Item dist/NetworkEd.exe).Length / 1MB)
+
+      # Starts the trimmed exe headless and checks it loads (icons, adapters, watcher).
+      # Read-only; stops the release if something the app needs was trimmed away.
+      - name: Self-test exe
+        run: just selftest
+        timeout-minutes: 5
 
       # Run page download: NetworkEd-<version>.zip -> NetworkEd-<version>/NetworkEd.exe
       - uses: actions/upload-artifact@v4
