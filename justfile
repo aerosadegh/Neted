@@ -8,11 +8,11 @@ default:
 sync:
     uv sync
 
-# Run the app for real (needs an elevated terminal)
+# Run the app for real (Windows: from an elevated terminal)
 run:
     uv run python src/main.py
 
-# Run in dry-run mode: no admin needed, PowerShell scripts are printed instead of executed
+# Run in dry-run mode: no admin needed, changes are printed instead of made
 dev $NETWORK_ED_DEBUG="true":
     uv run python src/main.py
 
@@ -37,18 +37,32 @@ check: lint test
 upx_dir := env("UPX_DIR", "C:/upx-5.1.1")
 
 # Build dist/NetworkEd.exe (unused Qt parts trimmed; UPX for the files it can safely pack)
+[windows]
 build:
     uv run pyinstaller --noconfirm --clean --upx-dir "{{ upx_dir }}" NetworkEd.spec
 
+# Build dist/NetworkEd (unused Qt parts trimmed)
+[unix]
+build:
+    uv run pyinstaller --noconfirm --clean NetworkEd.spec
+
 # Start the built exe headless, check it loads, write dist/self-test.json (read-only).
 # Needs an elevated terminal, or a test build made with `$env:NETED_NO_UAC=1; just build`.
+# Start the built exe headless and check it loads (elevated terminal, or NETED_NO_UAC=1 build)
+[windows]
 selftest:
     $env:QT_QPA_PLATFORM = "offscreen"; \
     $p = Start-Process dist/NetworkEd.exe -ArgumentList "--self-test=$PWD/dist/self-test.json" -PassThru -Wait; \
     Get-Content dist/self-test.json; \
     exit $p.ExitCode
 
-# Build, then pack dist/NetworkEd-<version>.zip (a NetworkEd-<version> folder holding the exe)
+# Start the built binary headless, check it loads, write dist/self-test.json (read-only)
+[unix]
+selftest:
+    QT_QPA_PLATFORM=offscreen ./dist/NetworkEd --self-test="$PWD/dist/self-test.json"; \
+    status=$?; cat dist/self-test.json; exit $status
+
+# Build, then pack the release archive: NetworkEd-<version>-<platform>.zip / .tar.gz
 package: build
     uv run python scripts/package.py
 

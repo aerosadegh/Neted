@@ -1,13 +1,14 @@
 name: Build
 
-# Pull requests: lint + tests only.
-# Version tags (v0.1.0, ...): lint + tests, then build NetworkEd.exe and release
-# NetworkEd-<version>.zip (a NetworkEd-<version>/ folder containing the exe).
+# Pull requests: lint + tests on Windows and Linux.
+# Version tags (v0.3.0, ...): the same, then build and self-test both platforms and
+# release NetworkEd-<version>-windows-x64.zip and NetworkEd-<version>-linux-x86_64.tar.gz
+# (each holds a folder of the same name containing only the executable).
 on:
   push:
     tags: ["v*"]
   pull_request:
-  workflow_dispatch: # builds the exe only when run on a tag
+  workflow_dispatch: # builds only when run on a tag
 
 permissions:
   contents: read
@@ -15,11 +16,17 @@ permissions:
 env:
   UPX_VERSION: "5.1.1"
   UPX_SHA256: "fa5380bca4c2718547aaa0134bc0d8a7fa27e102f0ac6371573d60d1c21d64de"
+  # Libraries Qt needs on a bare Ubuntu runner (tests and the self-test run offscreen).
+  QT_LINUX_LIBS: libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 libglib2.0-0
 
 jobs:
   check:
-    name: Lint and test
-    runs-on: windows-latest
+    name: Lint and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -30,6 +37,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
+
+      - name: Install Qt libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends $QT_LINUX_LIBS
 
       - name: Install dependencies
         run: uv sync --locked
@@ -43,12 +54,17 @@ jobs:
           QT_QPA_PLATFORM: offscreen
 
   build:
-    name: Build and release
+    name: Build (${{ matrix.platform }})
     if: startsWith(github.ref, 'refs/tags/v')
     needs: check
-    runs-on: windows-latest
-    permissions:
-      contents: write # create the GitHub release
+    strategy:
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+          - platform: linux
+            os: ubuntu-22.04 # oldest supported glibc, so the binary runs on older distros too
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -60,18 +76,24 @@ jobs:
         with:
           tool: just
 
+      - name: Install Qt libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends $QT_LINUX_LIBS
+
       - name: Install dependencies
         run: uv sync --locked
 
       - name: Check tag matches pyproject version
-        shell: pwsh
+        shell: bash
         run: |
-          $version = uv version --short
-          if ("v$version" -ne $env:GITHUB_REF_NAME) {
-            throw "Tag $env:GITHUB_REF_NAME does not match pyproject.toml version $version"
-          }
+          version=$(uv version --short)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match pyproject.toml version $version"
+            exit 1
+          fi
 
       - name: Install UPX ${{ env.UPX_VERSION }}
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $zip = Join-Path $env:RUNNER_TEMP "upx.zip"
@@ -83,33 +105,56 @@ jobs:
           & (Join-Path $dir "upx.exe") --version
           "UPX_DIR=$dir" >> $env:GITHUB_ENV
 
-      # Builds dist/NetworkEd.exe (version resource <version>.<run number>), then packs
-      # dist/NetworkEd-<version>.zip containing the folder NetworkEd-<version>/NetworkEd.exe.
+      # Builds dist/NetworkEd(.exe), then packs the release archive (scripts/package.py).
       - name: Build and package
         id: package
         run: just package
 
-      - name: Show exe properties
-        shell: pwsh
+      - name: Show executable
+        shell: bash
         run: |
-          (Get-Item dist/NetworkEd.exe).VersionInfo | Format-List FileVersion, ProductVersion, ProductName, FileDescription
-          "Size: {0:N1} MB" -f ((Get-Item dist/NetworkEd.exe).Length / 1MB)
+          ls -la dist/NetworkEd*
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            pwsh -c '(Get-Item dist/NetworkEd.exe).VersionInfo | Format-List FileVersion, ProductVersion, ProductName'
+          fi
 
-      # Starts the trimmed exe headless and checks it loads (icons, adapters, watcher).
-      # Read-only; stops the release if something the app needs was trimmed away.
-      - name: Self-test exe
+      # Starts the trimmed executable headless and checks it loads (icons, adapters,
+      # watcher). Read-only; stops the release if something it needs was trimmed away.
+      - name: Self-test
         run: just selftest
         timeout-minutes: 5
 
-      # Run page download: NetworkEd-<version>.zip -> NetworkEd-<version>/NetworkEd.exe
+      # Run page download: NetworkEd-<version>-<platform>/ with only the executable.
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.package.outputs.name }}
           path: ${{ steps.package.outputs.folder }}
           if-no-files-found: error
 
-      # Release asset: the same NetworkEd-<version>.zip
+      # Handed to the release job below.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+
+      - run: ls -la release
+
+      # One job publishes both archives, so the two builds never race to create the release.
       - uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.package.outputs.zip }}
+          files: release/*
           generate_release_notes: true

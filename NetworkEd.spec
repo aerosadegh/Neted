@@ -1,13 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Build with `just build`. UPX is used when found (`--upx-dir` or PATH); without it the
-# build still works, the exe is just bigger. network_profiles.json is NOT bundled: the app
-# reads and writes it next to the exe.
+# Build with `just build` on Windows (dist/NetworkEd.exe) or Linux (dist/NetworkEd).
+# Windows only: UPX when found (`--upx-dir` or PATH), the .ico icon, the version
+# resource and the UAC admin manifest. network_profiles.json is NOT bundled: the app
+# reads and writes it next to the executable.
 
 import os
 import re
 import tomllib
 from pathlib import Path
 
+from PyInstaller.compat import is_win
 from PyInstaller.utils.win32.versioninfo import (
     FixedFileInfo,
     StringFileInfo,
@@ -56,11 +58,11 @@ version_info = VSVersionInfo(
 
 
 a = Analysis(
-    ['src\\main.py'],
+    ['src/main.py'],
     pathex=[],
     binaries=[],
     datas=[
-        ('assets\\icon.svg', 'assets'),
+        ('assets/icon.svg', 'assets'),
         ('pyproject.toml', '.'),  # src/version.py reads the version from it
     ],
     hiddenimports=[],
@@ -81,6 +83,7 @@ a = Analysis(
 DROP_FILES = {
     'opengl32sw.dll',  # software OpenGL fallback; the UI doesn't use OpenGL (5.5 MB)
     'Qt6Pdf.dll',  # only needed by the PDF image plugin (2.5 MB)
+    'libQt6Pdf.so.6',  # the same on Linux
     'libcrypto-3-x64.dll',  # OpenSSL for Qt's TLS plugins; no HTTPS is used
     'libssl-3-x64.dll',
 }
@@ -90,10 +93,11 @@ DROP_DIRS = (
     'PyQt6/Qt6/plugins/networkinformation/',
     'PyQt6/Qt6/plugins/generic/',
 )
-# For these plugin folders only the listed files are kept (offscreen: headless self-test).
+# For these plugin folders only files starting with one of these names are kept
+# (offscreen: the headless self-test; xcb/wayland: X11 and Wayland desktops).
 KEEP_PLUGINS = {
-    'platforms': {'qwindows.dll', 'qoffscreen.dll'},
-    'imageformats': {'qsvg.dll', 'qico.dll'},
+    'platforms': ('qwindows.dll', 'qoffscreen.dll', 'libqxcb', 'libqwayland', 'libqoffscreen'),
+    'imageformats': ('qsvg.dll', 'qico.dll', 'libqsvg', 'libqico'),
 }
 # src/icons.py loads only Font Awesome 5 Solid; qtawesome ships ~10 fonts (2.5 MB).
 KEEP_FONT_PREFIX = 'fontawesome5-solid-webfont'
@@ -106,7 +110,7 @@ def _keep(entry):
         return False
     plugin = re.match(r'PyQt6/Qt6/plugins/([^/]+)/(.+)$', name)
     if plugin and plugin.group(1) in KEEP_PLUGINS:
-        return plugin.group(2) in KEEP_PLUGINS[plugin.group(1)]
+        return plugin.group(2).startswith(KEEP_PLUGINS[plugin.group(1)])
     if name.startswith('qtawesome/fonts/'):
         return base.startswith(KEEP_FONT_PREFIX)
     return True
@@ -127,7 +131,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=is_win,  # on Linux UPX'd Qt libraries tend to break; zlib already compresses
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -136,9 +140,9 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='assets\\icon.ico',
-    version=version_info,
+    icon='assets/icon.ico' if is_win else None,
+    version=version_info if is_win else None,
     # NETED_NO_UAC=1 builds a test exe that can run from a non-elevated shell
     # (local self-test only; releases always require admin).
-    uac_admin=os.environ.get('NETED_NO_UAC') != '1',
+    uac_admin=is_win and os.environ.get('NETED_NO_UAC') != '1',
 )
