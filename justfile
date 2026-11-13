@@ -40,6 +40,10 @@ upx_dir := env("UPX_DIR", "C:/upx-5.1.1")
 build:
     uv run pyinstaller --noconfirm --clean --upx-dir "{{ upx_dir }}" NetworkEd.spec
 
+# Build, then pack dist/NetworkEd-<version>.zip (a NetworkEd-<version> folder holding the exe)
+package: build
+    uv run python scripts/package.py
+
 # Regenerate assets/icon.ico from assets/icon.svg
 icon:
     uv run python scripts/make_icon.py

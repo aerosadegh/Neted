@@ -1,7 +1,8 @@
 name: Build
 
 # Pull requests: lint + tests only.
-# Version tags (v0.1.0, ...): lint + tests, then build NetworkEd.exe and attach it to a release.
+# Version tags (v0.1.0, ...): lint + tests, then build NetworkEd.exe and release
+# NetworkEd-<version>.zip (a NetworkEd-<version>/ folder containing the exe).
 on:
   push:
     tags: ["v*"]
@@ -42,12 +43,12 @@ jobs:
           QT_QPA_PLATFORM: offscreen
 
   build:
-    name: Build exe
+    name: Build and release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: check
     runs-on: windows-latest
-    outputs:
-      artifact: ${{ steps.version.outputs.artifact }}
+    permissions:
+      contents: write # create the GitHub release
     steps:
       - uses: actions/checkout@v4
 
@@ -63,14 +64,12 @@ jobs:
         run: uv sync --locked
 
       - name: Check tag matches pyproject version
-        id: version
         shell: pwsh
         run: |
           $version = uv version --short
           if ("v$version" -ne $env:GITHUB_REF_NAME) {
             throw "Tag $env:GITHUB_REF_NAME does not match pyproject.toml version $version"
           }
-          "artifact=NetworkEd-$version" >> $env:GITHUB_OUTPUT
 
       - name: Install UPX ${{ env.UPX_VERSION }}
         shell: pwsh
@@ -84,33 +83,25 @@ jobs:
           & (Join-Path $dir "upx.exe") --version
           "UPX_DIR=$dir" >> $env:GITHUB_ENV
 
-      # The spec writes the exe's version resource: <version>.<run number>.
-      - name: Build exe
-        run: just build
+      # Builds dist/NetworkEd.exe (version resource <version>.<run number>), then packs
+      # dist/NetworkEd-<version>.zip containing the folder NetworkEd-<version>/NetworkEd.exe.
+      - name: Build and package
+        id: package
+        run: just package
 
       - name: Show exe properties
         shell: pwsh
         run: (Get-Item dist/NetworkEd.exe).VersionInfo | Format-List FileVersion, ProductVersion, ProductName, FileDescription
 
-      # Download is a zip named NetworkEd-<version> containing only NetworkEd.exe.
+      # Run page download: NetworkEd-<version>.zip -> NetworkEd-<version>/NetworkEd.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.version.outputs.artifact }}
-          path: dist/NetworkEd.exe
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.folder }}
           if-no-files-found: error
 
-  release:
-    name: Attach exe to GitHub release
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.build.outputs.artifact }}
-
+      # Release asset: the same NetworkEd-<version>.zip
       - uses: softprops/action-gh-release@v2
         with:
-          files: NetworkEd.exe
+          files: ${{ steps.package.outputs.zip }}
           generate_release_notes: true
