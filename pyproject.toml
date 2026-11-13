@@ -1,6 +1,6 @@
 [project]
 name = "neted"
-version = "0.2.2"
+version = "0.3.0"
 description = "Network Ed: switch Windows network adapters between saved static IP/DNS profiles and DHCP from a tray app."
 readme = "README.md"
 requires-python = ">=3.12"
