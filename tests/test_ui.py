@@ -65,6 +65,7 @@ def window(qapp, store_path, monkeypatch, adapters):
     w = ui.MainWindow()
     settle(qapp, w)
     yield w
+    settle(qapp, w)  # no background job may outlive this test's fakes
     w._is_quitting = True
     w.tray_icon.hide()
     w.close()

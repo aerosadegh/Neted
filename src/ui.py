@@ -370,6 +370,7 @@ class MainWindow(QMainWindow):
             return
         self._is_quitting = True
         self._watcher.stop()
+        self._tasks.shutdown()  # a running Apply still finishes before the process exits
         self.tray_icon.hide()
         QApplication.quit()
 
@@ -377,6 +378,7 @@ class MainWindow(QMainWindow):
         """Closing the window hides it to the tray; Quit in the tray menu exits."""
         if self._is_quitting:
             self._watcher.stop()
+            self._tasks.shutdown()
             event.accept()
             return
         event.ignore()
