@@ -90,11 +90,15 @@ def test_no_signal_after_stop(qapp):
     assert hits == []
 
 
-def test_without_windows_api_it_is_a_quiet_no_op(qapp, monkeypatch):
+def test_without_any_change_source_it_is_a_quiet_no_op(qapp, monkeypatch):
+    # Neither the Windows API nor `ip monitor` (Linux) is available.
     monkeypatch.setattr(netwatch, "_load_iphlpapi", lambda: None)
+    monkeypatch.setattr(netwatch, "LINUX_MONITOR", ["no-such-command-xyz", "monitor"])
     w = NetworkChangeWatcher()
-    assert not w.available
-    w.stop()
+    try:
+        assert not w.available
+    finally:
+        w.stop()  # never leave a monitor process behind, even if the test fails
 
 
 # --- process-based watcher (Linux uses `ip monitor`; tested here with a stand-in) ---

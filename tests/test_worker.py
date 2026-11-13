@@ -54,3 +54,16 @@ def test_shutdown_drops_queued_jobs(qapp):
     runner.wait(5000)
     qapp.processEvents()
     assert "queued job ran" not in ran
+
+
+def test_two_runners_only_get_their_own_results(qapp):
+    # All runners share one bridge; each must ignore the others' job ids.
+    first, second = TaskRunner(), TaskRunner()
+    got_first, got_second = [], []
+    first.run(lambda: "one", got_first.append, got_first.append)
+    second.run(lambda: "two", got_second.append, got_second.append)
+    first.wait(5000)
+    second.wait(5000)
+    qapp.processEvents()
+    assert got_first == ["one"]
+    assert got_second == ["two"]
